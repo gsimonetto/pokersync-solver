@@ -17,7 +17,9 @@ evita que uma mudança no motor quebre o deploy do produto.
 - `tests/` — validação do núcleo CFR contra Kuhn Poker (solução
   analítica conhecida, rodar sempre que mexer em `cfr_core.py`) e do
   motor pós-flop contra a fórmula fechada de MDF, no river
-  (`tests/postflop_river.py`) e no turn (`tests/postflop_turn.py`).
+  (`tests/postflop_river.py`), no turn (`tests/postflop_turn.py`) e
+  via exploitability/best-response exato no river
+  (`tests/postflop_exploitability.py`).
 
 ## Setup local
 
@@ -151,6 +153,17 @@ await fetch(`${SOLVER_API_URL}/jobs/pushfold`, {
     `tests/postflop_turn.py`). O cálculo de equity all-in no turn
     (`runout_equity`) também foi cross-validado byte-a-byte contra
     uma reimplementação independente (diff exato = 0).
+  - **Exploitability rigorosa via best-response exato** (só pro river
+    por enquanto — `PostflopSolver.compute_exploitability()`, mesmo
+    padrão de `tests/kuhn_poker.py` e
+    `engine/rfi_jam.py::compute_exploitability`, mas cobrindo a árvore
+    inteira, não só uma decisão isolada como o teste de MDF): testado
+    no mesmo spot polarizado-vs-bluffcatcher, exploitability ficou em
+    0,39% do pote — ver `tests/postflop_exploitability.py`. Detalhe de
+    implementação: a convenção de contabilidade do motor faz
+    `br_oop + br_ip` somar sempre `pot0` num equilíbrio perfeito (não
+    0 como em Kuhn Poker), então `compute_exploitability()` já
+    devolve o valor com essa constante subtraída.
   - Limitações conhecidas (documentadas): (1) decisões são por classe
     de mão, não por combo — sem discriminação de blocker dentro da
     classe (mesmo espírito da aproximação já aceita em
