@@ -1,47 +1,50 @@
 """
-Motor pós-flop — primeira rua real: RIVER heads-up.
+Motor pós-flop — CFR heads-up generalizado pra qualquer rua (flop, turn
+ou river) a partir de um board parcial ou completo.
 
-Por que começar pelo river e não pelo flop: river não tem cartas por vir,
-então dá pra resolver EXATO (sem Monte Carlo, sem chance node) — o board
-já está 100% definido, então a força de cada mão é determinística. Isso
-isola o problema novo (árvore de apostas pós-flop de verdade, com
-tamanhos variáveis e range vs range) do problema de chance nodes
-(turn/flop), que fica pra um próximo incremento (ver README).
+Evolução do motor: a v1 só resolvia o RIVER (board de 5 cartas já
+completo, sem carta por vir, então dava pra resolver 100% exato). Essa
+v2 generaliza pra board de 3 ou 4 cartas (flop/turn) — a diferença é
+que agora existem CARTAS AINDA NÃO REVELADAS, então a árvore precisa
+de nós de chance:
 
-Abstração usada (DELIBERADA, documentada — mesmo espírito da limitação
-já registrada em hand_classes.py pro pré-flop): as decisões da árvore
-são por CLASSE de mão (ex: 'AKs', 'T9o'), não por combo individual. A
-força de cada classe nesse board específico, porém, É exata: cada
-classe é expandida em todos os seus combos reais válidos (removendo
-conflito com as cartas do board), avaliada com o avaliador de mão real
-(treys) contra o board real, e o resultado classe-vs-classe é a MÉDIA
-sobre todos os pares de combos válidos (sem conflito de carta entre
-herói e vilão) — isso já captura efeito de blocker a nível de classe.
-O que fica de fora nessa v1: dois combos da MESMA classe (ex AhKh vs
-AsKs) são tratados como estrategicamente idênticos (mesma frequência
-de bet/call) — não tem discriminação de blocker dentro da classe ainda.
+  - Quando a rua termina SEM ninguém all-in (ex: check-check, ou call
+    de uma aposta que não usa o stack inteiro de nenhum dos dois) e
+    ainda falta carta pra sair: em vez de ir direto pro showdown, o
+    motor SORTEIA uma carta (amostragem — MCCFR de chance, mesmo
+    espírito já usado em `rfi_jam.py`/`multiway_rfi.py` pra amostrar
+    mão de herói/vilão a cada iteração) e continua a árvore na
+    próxima rua, com o mesmo par de classes e os mesmos stacks
+    comprometidos até aqui.
+  - Quando alguém fica all-in (nenhum dos dois tem mais fichas atrás)
+    e ainda falta carta pra sair: não faz mais sentido amostrar (não
+    tem mais decisão nenhuma pela frente) — o motor calcula a equity
+    EXATA fazendo a média sobre TODAS as cartas que podem completar o
+    board (sem amostragem, sem ruído — é rápido o suficiente pra
+    river/turn, mais pesado pro flop com 2 cartas por vir).
 
-Árvore modelada (heads-up, river, tamanhos de aposta configuráveis):
-  OOP (fora de posição, age primeiro): check ou bet(tamanho s, fração do pote).
-    bet -> IP: fold, call, ou raise (all-in, tamanho único — mesma
-      simplificação já usada no pré-flop pra 3-bet/4-bet: qualquer
-      raise pós-bet é tratado como all-in, correto pra stacks curtos/
-      médios, não serve pra deep stack multi-raise).
-      raise -> OOP: fold ou call (all-in genuíno, showdown real).
-    check -> IP: check (showdown) ou bet(tamanho s).
-      bet -> OOP: fold, call, ou raise (all-in).
-        raise -> IP: fold ou call.
+Isso significa: passar um board de 5 cartas reproduz exatamente o
+comportamento da v1 (RiverSolver = PostflopSolver com board completo,
+nenhum nó de chance é criado). Passar um board de 4 cartas resolve o
+TURN de verdade. Passar um board de 3 cartas resolve o FLOP — funciona
+pela mesma lógica, mas é MUITO mais pesado (a equity all-in precisa
+enumerar turn x river = ~2300 combinações por par de classes) e não
+foi validado num spot real ainda (ver README).
 
-Pote/stacks: `pot` é o dinheiro já no meio ANTES dessa decisão (vindo
-de ruas anteriores). `stack_oop`/`stack_ip` são os stacks efetivos
-ainda NÃO comprometidos nesta rua (o que cada um pode apostar). Se o
-respondente não tem stack suficiente pra pagar um raise all-in por
-completo, o call é limitado ao stack dele (regra padrão de poker: a
-parte não paga de uma aposta/raise volta pra quem apostou, não conta
-no pote final).
+Limitação NOVA desta v2 (documentada, no mesmo espírito das outras):
+a carta sorteada nos nós de chance ignora blockers entre ela e as
+mãos específicas de herói/vilão (só evita colidir com o board) — a
+abstração é por classe, não por combo, então não dá pra saber ainda
+quais cartas exatas cada jogador segura nesse ponto da árvore.
+
+Abstração por classe de mão e árvore de apostas (check/bet ->
+fold/call/raise-all-in -> fold/call) seguem exatamente como
+documentado antes — ver o resto deste docstring nas versões
+anteriores do arquivo / README.
 """
 
 import itertools
+import random
 import sys
 from pathlib import Path
 
@@ -58,7 +61,8 @@ SUITS = "shdc"
 
 def parse_board(board) -> list:
     """Aceita 'AhKd7s2c9h', 'Ah Kd 7s 2c 9h' ou lista ['Ah','Kd',...].
-    Retorna lista de strings de carta de 2 chars (rank+naipe)."""
+    Retorna lista de strings de carta de 2 chars (rank+naipe). Aceita
+    3 (flop), 4 (turn) ou 5 (river) cartas."""
     if isinstance(board, str):
         board = board.replace(" ", "")
         cards = [board[i:i + 2] for i in range(0, len(board), 2)]
@@ -66,12 +70,14 @@ def parse_board(board) -> list:
         cards = list(board)
     if len(set(cards)) != len(cards):
         raise ValueError(f"board com cartas repetidas: {cards}")
+    if len(cards) not in (3, 4, 5):
+        raise ValueError(f"board precisa ter 3 (flop), 4 (turn) ou 5 (river) cartas, recebeu {len(cards)}")
     return cards
 
 
 def expand_class_combos(hand_class: str, dead_cards) -> list:
     """Todos os combos reais (cartas com naipe) de uma classe, excluindo
-    qualquer combo que use uma carta já no board."""
+    qualquer combo que use uma carta já no board (ou outra carta morta)."""
     dead = set(dead_cards)
     if len(hand_class) == 2:  # par, ex 'AA'
         r = hand_class[0]
@@ -96,19 +102,21 @@ def expand_class_combos(hand_class: str, dead_cards) -> list:
     return combos
 
 
-def build_river_showdown_matrix(classes, board):
-    """Retorna (matrix, live_classes, combos_by_class).
-    matrix[(classe_a, classe_b)] = probabilidade de a vencer o showdown
-    contra b nesse board exato (1.0=vence sempre, 0.0=perde sempre,
-    0.5=empate), média sobre todos os pares de combos válidos (sem
-    conflito de carta entre board/herói/vilão). live_classes = classes
-    com pelo menos 1 combo possível nesse board."""
-    board_cards = parse_board(board)
-    dead = set(board_cards)
-    board_int = [Card.new(c) for c in board_cards]
+def class_pair_win_prob(ca, cb, board5, cache=None):
+    """Probabilidade de `ca` vencer o showdown contra `cb` num board
+    COMPLETO (5 cartas), media sobre todos os pares de combos validos
+    (sem conflito de carta entre board/herói/vilão). None se não
+    existir nenhum par valido (classe totalmente bloqueada pelo
+    board). `board5`: tupla de 5 strings de carta. Determinístico
+    (sem Monte Carlo) — cacheável com segurança."""
+    key = (ca, cb, board5)
+    if cache is not None and key in cache:
+        return cache[key]
 
-    combos_by_class = {c: expand_class_combos(c, dead) for c in classes}
-    live_classes = [c for c in classes if combos_by_class[c]]
+    dead = set(board5)
+    combos_a = expand_class_combos(ca, dead)
+    combos_b = expand_class_combos(cb, dead)
+    board_int = [Card.new(c) for c in board5]
 
     rank_cache = {}
 
@@ -118,51 +126,89 @@ def build_river_showdown_matrix(classes, board):
             rank_cache[combo] = EVALUATOR.evaluate(board_int, cards)
         return rank_cache[combo]
 
-    matrix = {}
-    for ca in live_classes:
-        for cb in live_classes:
-            total, n = 0.0, 0
-            for combo_a in combos_by_class[ca]:
-                set_a = set(combo_a)
-                ra = get_rank(combo_a)
-                for combo_b in combos_by_class[cb]:
-                    if set_a & set(combo_b):
-                        continue
-                    rb = get_rank(combo_b)
-                    if ra < rb:  # treys: menor = melhor
-                        total += 1.0
-                    elif ra == rb:
-                        total += 0.5
-                    n += 1
-            if n > 0:
-                matrix[(ca, cb)] = total / n
-    return matrix, live_classes, combos_by_class
+    total, n = 0.0, 0
+    for combo_a in combos_a:
+        set_a = set(combo_a)
+        ra = get_rank(combo_a)
+        for combo_b in combos_b:
+            if set_a & set(combo_b):
+                continue
+            rb = get_rank(combo_b)
+            if ra < rb:  # treys: menor = melhor
+                total += 1.0
+            elif ra == rb:
+                total += 0.5
+            n += 1
+
+    result = (total / n) if n > 0 else None
+    if cache is not None:
+        cache[key] = result
+    return result
 
 
-class RiverSolver:
-    """CFR exato (full-enumeration, igual kuhn_poker.py/pushfold.py — sem
-    amostragem) sobre a árvore de river descrita no docstring do módulo.
-    Reaproveita o núcleo genérico de regret matching (cfr_core)."""
+def runout_equity(ca, cb, board_partial, cache_runout=None, cache_showdown=None):
+    """Equity EXATA (sem amostragem) de `ca` vs `cb`, com o board ainda
+    incompleto (3 ou 4 cartas) -- media sobre TODAS as cartas que
+    podem completar o board até 5. Usado só quando ninguém tem mais
+    decisão pela frente (all-in). `board_partial`: tupla de 3 ou 4
+    strings de carta."""
+    if len(board_partial) == 5:
+        return class_pair_win_prob(ca, cb, board_partial, cache_showdown)
+
+    key = (ca, cb, board_partial)
+    if cache_runout is not None and key in cache_runout:
+        return cache_runout[key]
+
+    dead = set(board_partial)
+    total, n = 0.0, 0
+    for r in RANKS:
+        for s in SUITS:
+            card = r + s
+            if card in dead:
+                continue
+            val = runout_equity(ca, cb, board_partial + (card,), cache_runout, cache_showdown)
+            if val is not None:
+                total += val
+                n += 1
+
+    result = (total / n) if n > 0 else None
+    if cache_runout is not None:
+        cache_runout[key] = result
+    return result
+
+
+class PostflopSolver:
+    """CFR exato sobre classes de mão (full-enumeration entre classes,
+    sem amostragem) + nós de chance pra cartas ainda não reveladas
+    (amostrados via MCCFR, exceto quando ambos ficam all-in, caso em
+    que a equity de "correr o board" é calculada exata). Reaproveita o
+    núcleo genérico de regret matching (`cfr_core`).
+
+    board de 5 cartas -> resolve só o RIVER (validado, ver
+    tests/postflop_river.py). board de 4 -> resolve o TURN (mais uma
+    rua de aposta + a carta do river por vir). board de 3 -> resolve o
+    FLOP (mais pesado, não validado ainda -- ver README).
+    """
 
     def __init__(self, board, range_oop: dict, range_ip: dict, pot: float,
-                 stack_oop: float, stack_ip: float, bet_sizes=(0.33, 0.75, 1.5)):
-        self.board = parse_board(board)
+                 stack_oop: float, stack_ip: float, bet_sizes=(0.33, 0.75, 1.5), seed=42):
+        self.board0 = tuple(parse_board(board))
         self.pot0 = pot
         self.stack_oop = stack_oop
         self.stack_ip = stack_ip
         self.bet_sizes = list(bet_sizes)
+        self.rng = random.Random(seed)
 
         classes = all_hand_classes()
-        self.showdown, live_classes, combos_by_class = build_river_showdown_matrix(classes, self.board)
+        combos0 = {c: expand_class_combos(c, self.board0) for c in classes}
 
-        # so entram no range classes vivas nesse board E com peso > 0
-        self.classes_oop = [c for c in live_classes if range_oop.get(c, 0.0) > 0.0]
-        self.classes_ip = [c for c in live_classes if range_ip.get(c, 0.0) > 0.0]
+        self.classes_oop = [c for c in classes if combos0[c] and range_oop.get(c, 0.0) > 0.0]
+        self.classes_ip = [c for c in classes if combos0[c] and range_ip.get(c, 0.0) > 0.0]
         if not self.classes_oop or not self.classes_ip:
             raise ValueError("range vazio (ou totalmente bloqueado pelo board) pra OOP ou IP")
 
         def weights(range_dict, cls_list):
-            raw = {c: range_dict[c] * len(combos_by_class[c]) for c in cls_list}
+            raw = {c: range_dict[c] * len(combos0[c]) for c in cls_list}
             total = sum(raw.values())
             return {c: w / total for c, w in raw.items()}
 
@@ -170,11 +216,10 @@ class RiverSolver:
         self.w_ip = weights(range_ip, self.classes_ip)
 
         self.trainer = DiscountedCFRTrainer()
+        self._showdown_cache = {}
+        self._runout_cache = {}
 
-    # ---- pote/showdown ----
-
-    def _showdown(self, ca, cb):
-        return self.showdown.get((ca, cb))
+    # ---- pote/showdown/chance ----
 
     @staticmethod
     def _terminal_fold(folder, committed_oop, committed_ip, pot0):
@@ -183,17 +228,40 @@ class RiverSolver:
             return -committed_oop, pot_total - committed_ip
         return pot_total - committed_oop, -committed_ip
 
-    def _terminal_showdown(self, ca, cb, committed_oop, committed_ip):
-        pot_total = self.pot0 + committed_oop + committed_ip
-        result = self._showdown(ca, cb)
-        if result is None:
-            return 0.0, 0.0
-        return pot_total * result - committed_oop, pot_total * (1 - result) - committed_ip
+    def _end_of_action(self, ca, cb, committed_oop, committed_ip, p_oop, p_ip, board, prefix):
+        """Chamado sempre que a rodada de apostas da rua atual termina
+        sem fold (check-check, ou call que não usa raise). Três casos:
+        board ja completo -> showdown exato; alguem all-in com board
+        incompleto -> equity exata de "correr o board"; caso contrario
+        -> sorteia a proxima carta e segue pra proxima rua."""
+        if len(board) == 5:
+            result = class_pair_win_prob(ca, cb, board, self._showdown_cache)
+            pot_total = self.pot0 + committed_oop + committed_ip
+            if result is None:
+                return 0.0, 0.0
+            return pot_total * result - committed_oop, pot_total * (1 - result) - committed_ip
+
+        remaining_oop = self.stack_oop - committed_oop
+        remaining_ip = self.stack_ip - committed_ip
+        if remaining_oop <= 1e-9 or remaining_ip <= 1e-9:
+            result = runout_equity(ca, cb, board, self._runout_cache, self._showdown_cache)
+            pot_total = self.pot0 + committed_oop + committed_ip
+            if result is None:
+                return 0.0, 0.0
+            return pot_total * result - committed_oop, pot_total * (1 - result) - committed_ip
+
+        deck = [r + s for r in RANKS for s in SUITS if (r + s) not in set(board)]
+        card = self.rng.choice(deck)
+        new_board = board + (card,)
+        return self._node_bet_or_check(
+            "oop", ca, cb, committed_oop, committed_ip, p_oop, p_ip,
+            prefix + f"|deal{card}", is_second=False, board=new_board,
+        )
 
     # ---- árvore ----
 
     def _node_facing_raise(self, bettor, ca, cb, bet_amt, raise_to,
-                            committed_oop, committed_ip, p_oop, p_ip, prefix):
+                            committed_oop, committed_ip, p_oop, p_ip, board, prefix):
         """`bettor` (quem apostou originalmente) decide fold/call contra o
         raise. Call é limitado ao stack do bettor (uncalled excess volta
         pro raiser, regra padrão)."""
@@ -207,12 +275,9 @@ class RiverSolver:
         own_p = p_oop if is_oop else p_ip
         strat = infoset.get_strategy(own_p)
 
-        if is_oop:
-            u_fold = self._terminal_fold("oop", bet_amt, bet_amt, self.pot0)
-            u_call = self._terminal_showdown(ca, cb, matched, matched)
-        else:
-            u_fold = self._terminal_fold("ip", bet_amt, bet_amt, self.pot0)
-            u_call = self._terminal_showdown(ca, cb, matched, matched)
+        folder = "oop" if is_oop else "ip"
+        u_fold = self._terminal_fold(folder, bet_amt, bet_amt, self.pot0)
+        u_call = self._end_of_action(ca, cb, matched, matched, p_oop, p_ip, board, prefix + "|allin")
 
         node_oop = strat[0] * u_fold[0] + strat[1] * u_call[0]
         node_ip = strat[0] * u_fold[1] + strat[1] * u_call[1]
@@ -227,7 +292,7 @@ class RiverSolver:
         return node_oop, node_ip
 
     def _node_facing_bet(self, bettor, ca, cb, bet_amt, committed_oop, committed_ip,
-                          p_oop, p_ip, prefix):
+                          p_oop, p_ip, board, prefix):
         """`responder` (o outro jogador) decide fold/call/raise contra a
         aposta de `bettor`."""
         responder = "ip" if bettor == "oop" else "oop"
@@ -250,7 +315,7 @@ class RiverSolver:
 
         call_committed_oop = new_committed_oop + (bet_amt if is_resp_oop else 0)
         call_committed_ip = new_committed_ip + (bet_amt if not is_resp_oop else 0)
-        u_call = self._terminal_showdown(ca, cb, call_committed_oop, call_committed_ip)
+        u_call = self._end_of_action(ca, cb, call_committed_oop, call_committed_ip, p_oop, p_ip, board, prefix + "|call")
 
         if raise_legal:
             raise_to = own_stack  # all-in
@@ -258,7 +323,7 @@ class RiverSolver:
             new_p_ip = p_ip * strat[2] if not is_resp_oop else p_ip
             u_raise = self._node_facing_raise(
                 bettor, ca, cb, bet_amt, raise_to,
-                new_committed_oop, new_committed_ip, new_p_oop, new_p_ip, prefix,
+                new_committed_oop, new_committed_ip, new_p_oop, new_p_ip, board, prefix,
             )
         else:
             u_raise = (0.0, 0.0)
@@ -281,9 +346,9 @@ class RiverSolver:
         return node_oop, node_ip
 
     def _node_bet_or_check(self, actor, ca, cb, committed_oop, committed_ip,
-                            p_oop, p_ip, prefix, is_second):
+                            p_oop, p_ip, prefix, is_second, board):
         """`actor` decide check ou bet(tamanho). `is_second`=True quando
-        já é a resposta a um check anterior (check aqui -> showdown)."""
+        já é a resposta a um check anterior (check aqui -> fim da rua)."""
         is_oop = actor == "oop"
         own_class = ca if is_oop else cb
         n_actions = 1 + len(self.bet_sizes)
@@ -294,14 +359,14 @@ class RiverSolver:
 
         # acao 0: check
         if is_second:
-            u_check = self._terminal_showdown(ca, cb, committed_oop, committed_ip)
+            u_check = self._end_of_action(ca, cb, committed_oop, committed_ip, p_oop, p_ip, board, prefix + "|xx")
         else:
             new_p_oop = p_oop * strat[0] if is_oop else p_oop
             new_p_ip = p_ip * strat[0] if not is_oop else p_ip
             other = "ip" if is_oop else "oop"
             u_check = self._node_bet_or_check(
                 other, ca, cb, committed_oop, committed_ip, new_p_oop, new_p_ip,
-                prefix + "-x", is_second=True,
+                prefix + "-x", is_second=True, board=board,
             )
 
         util_by_action = [u_check]
@@ -319,7 +384,7 @@ class RiverSolver:
             new_p_ip = p_ip * strat[1 + idx] if not is_oop else p_ip
             u_bet = self._node_facing_bet(
                 actor, ca, cb, bet_amt, committed_oop, committed_ip,
-                new_p_oop, new_p_ip, prefix + f"-b{idx}",
+                new_p_oop, new_p_ip, board, prefix + f"-b{idx}",
             )
             util_by_action.append(u_bet)
 
@@ -343,7 +408,7 @@ class RiverSolver:
                 for cb in self.classes_ip:
                     p_ip = self.w_ip[cb]
                     self._node_bet_or_check(
-                        "oop", ca, cb, 0.0, 0.0, p_oop, p_ip, "", is_second=False,
+                        "oop", ca, cb, 0.0, 0.0, p_oop, p_ip, "", is_second=False, board=self.board0,
                     )
             self.trainer.discount(t)
 
@@ -388,38 +453,37 @@ class RiverSolver:
         return out
 
 
+# Compatibilidade com o nome usado na v1 (river-only) -- um board de 5
+# cartas nunca dispara nó de chance, então o comportamento é idêntico.
+RiverSolver = PostflopSolver
+
+
 if __name__ == "__main__":
-    # Spot de exemplo: board seco (sem draw), range da OOP polarizada
-    # (nuts + air), range da IP so com bluff-catchers medios -- serve pra
-    # checagem de sanidade (nuts aposta muito mais que air/meio-de-range,
-    # e a IP so paga com mao boa o suficiente).
-    board = "Ah Kd 7s 2c 9h"
+    # Spot de exemplo no TURN: falta a carta do river. Board seco,
+    # range da OOP polarizada (nuts + air), range da IP so com
+    # bluff-catchers medios.
+    board = "Ah Kd 7s 2c"  # turn -- falta o river
 
-    range_oop = {"AA": 1.0, "AKo": 1.0, "AKs": 1.0, "KK": 1.0, "72o": 1.0, "83o": 1.0, "T9o": 1.0}
-    range_ip = {"AQo": 1.0, "AQs": 1.0, "AJo": 1.0, "KQo": 1.0, "KJo": 1.0, "QQ": 1.0, "JJ": 1.0}
+    # blefes com ranks que NAO aparecem no board -- mesmo emparelhando
+    # no river, viram so um par abaixo de QQ (nunca vencem o bluff-catcher)
+    range_oop = {"AA": 1.0, "KK": 1.0, "93o": 1.0, "84o": 1.0}
+    range_ip = {"QQ": 1.0}
 
-    solver = RiverSolver(
+    solver = PostflopSolver(
         board=board, range_oop=range_oop, range_ip=range_ip,
-        pot=20.0, stack_oop=60.0, stack_ip=60.0, bet_sizes=(0.33, 0.75, 1.5),
+        pot=20.0, stack_oop=60.0, stack_ip=60.0, bet_sizes=(0.5,),
     )
-    solver.train(iterations=1500)
+    solver.train(iterations=3000)
 
     strat = solver.average_strategy_root()
-    print(f"Board: {board}  (top set AA, overpair KK, TPTK-ish AKo/AKs vs ar/blefes 72o/83o/T9o)")
+    print(f"Board (turn, falta river): {board}")
     print("\n--- OOP (raiz: check vs bet) ---")
-    for c in ["AA", "KK", "AKo", "AKs", "T9o", "83o", "72o"]:
+    for c in ["AA", "KK", "93o", "84o"]:
         if c in strat["oop"]:
             row = strat["oop"][c]
             print(f"  {c:5s} " + "  ".join(f"{k}={v:.2f}" for k, v in row.items()))
 
-    print("\n--- IP (apos check da OOP: check vs bet) ---")
-    for c in ["QQ", "JJ", "AQo", "AQs", "AJo", "KQo", "KJo"]:
-        if c in strat["ip"]:
-            row = strat["ip"][c]
-            print(f"  {c:5s} " + "  ".join(f"{k}={v:.2f}" for k, v in row.items()))
-
-    print("\n--- Sanidade ---")
-    aa_bet = 1 - strat["oop"]["AA"]["check"]
-    air_bet = 1 - strat["oop"]["72o"]["check"]
-    print(f"AA (nuts) aposta com freq {aa_bet:.2f}; 72o (ar puro) aposta com freq {air_bet:.2f}")
-    print(f"  esperado: nuts aposta MUITO mais que ar puro -> {'OK' if aa_bet > air_bet else 'SUSPEITO'}")
+    qq = solver.facing_bet_strategy("oop", 0, "QQ")
+    print(f"\nQQ (bluff-catcher) contra a aposta: fold={qq[0]:.3f} call={qq[1]:.3f}")
+    expected = 20.0 / (20.0 + 0.5 * 20.0)
+    print(f"MDF teorico (mesma logica do river, valor/blefe sempre vence/perde): {expected:.3f}")

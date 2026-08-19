@@ -16,8 +16,8 @@ evita que uma mudança no motor quebre o deploy do produto.
 - `api/` — API mínima (FastAPI) só pra disparar/monitorar jobs.
 - `tests/` — validação do núcleo CFR contra Kuhn Poker (solução
   analítica conhecida, rodar sempre que mexer em `cfr_core.py`) e do
-  motor de river contra a fórmula fechada de MDF
-  (`tests/postflop_river.py`).
+  motor pós-flop contra a fórmula fechada de MDF, no river
+  (`tests/postflop_river.py`) e no turn (`tests/postflop_turn.py`).
 
 ## Setup local
 
@@ -125,29 +125,45 @@ await fetch(`${SOLVER_API_URL}/jobs/pushfold`, {
 - ⏳ 3-bet "de verdade" (não all-in) pré-flop — não iniciado. A árvore
   de RFI atual trata qualquer resposta a um raise como shove (correto
   pra stack curto/médio, não serve pra stack profundo).
-- ✅/⏳ **Pós-flop — river heads-up** (`engine/postflop.py`) — primeira
-  rua pós-flop real: dado um board fixo (5 cartas), range vs range
-  (por classe de mão) e tamanhos de aposta configuráveis, resolve a
-  árvore check/bet -> fold/call/raise(all-in) -> fold/call via CFR
-  exato (full-enumeration, sem amostragem, igual `pushfold.py`). Força
-  de mão calculada com o avaliador real (`treys`) direto no board —
-  sem Monte Carlo, já que no river o board está 100% definido.
-  **Validado contra fórmula fechada de teoria dos jogos**: no caso
-  clássico "range polarizada (valor puro + blefe puro) vs
-  bluff-catcher puro", a frequência de call do bluff-catcher batida
-  pelo CFR reproduz `MDF = pote/(pote+aposta)` com <1% de erro (ver
-  `tests/postflop_river.py`). Limitação conhecida (documentada,
-  mesmo espírito da aproximação já aceita em `hand_classes.py` pro
-  pré-flop): decisões são por classe de mão, não por combo — dois
-  combos da mesma classe (ex AhKh vs AsKs) têm a mesma frequência de
-  bet/call, sem discriminação de blocker dentro da classe. Raise é
-  limitado a um único tamanho (all-in), mesma simplificação do
-  pré-flop pra 3-bet/4-bet.
-- ⏳ Turn e flop — não iniciado. Diferente do river, essas ruas têm
-  carta por vir, então exigem nó de chance (turn/river runouts) sobre
-  a árvore de apostas já construída — provavelmente via amostragem
-  (MCCFR), no mesmo espírito da amostragem já usada no motor multiway
-  pra equity. Próximo passo natural depois do river.
+- ✅ **Pós-flop — river e turn heads-up** (`engine/postflop.py`,
+  classe `PostflopSolver`) — dado um board (3, 4 ou 5 cartas), range
+  vs range (por classe de mão) e tamanhos de aposta configuráveis,
+  resolve a árvore check/bet -> fold/call/raise(all-in) -> fold/call
+  via CFR exato entre classes (full-enumeration, sem amostragem,
+  igual `pushfold.py`). Força de mão via avaliador real (`treys`)
+  direto no board.
+  - **River** (board de 5 cartas, sem carta por vir): 100% exato, sem
+    nenhuma amostragem em lugar nenhum.
+  - **Turn** (board de 4 cartas, falta o river): quando a rua termina
+    sem ninguém all-in, o motor sorteia a carta do river (nó de
+    chance via MCCFR, mesmo espírito da amostragem já usada em
+    `rfi_jam.py`) e segue a árvore pro river; quando alguém fica
+    all-in, calcula a equity EXATA fazendo a média sobre as 46 cartas
+    possíveis do river (sem amostragem — rápido o suficiente pra não
+    precisar).
+  - `RiverSolver` continua existindo como alias de `PostflopSolver`
+    (compatibilidade — um board de 5 cartas nunca dispara nó de
+    chance, então o comportamento é idêntico ao da v1).
+  - **Validado contra fórmula fechada de teoria dos jogos** (MDF =
+    pote/(pote+aposta)) tanto no river quanto no turn all-in, com
+    <1% e ~2-3% de erro respectivamente (o turn tem mais ruído por
+    causa da amostragem de chance — ver `tests/postflop_river.py` e
+    `tests/postflop_turn.py`). O cálculo de equity all-in no turn
+    (`runout_equity`) também foi cross-validado byte-a-byte contra
+    uma reimplementação independente (diff exato = 0).
+  - Limitações conhecidas (documentadas): (1) decisões são por classe
+    de mão, não por combo — sem discriminação de blocker dentro da
+    classe (mesmo espírito da aproximação já aceita em
+    `hand_classes.py` pro pré-flop); (2) raise limitado a um único
+    tamanho (all-in), mesma simplificação do pré-flop pra 3-bet/4-bet;
+    (3) a carta sorteada nos nós de chance ignora blockers com as mãos
+    específicas dos jogadores (só evita colidir com o board).
+- ⏳ **Flop** — tecnicamente já funciona com o mesmo `PostflopSolver`
+  (passando um board de 3 cartas), mas MUITO mais pesado (equity
+  all-in no flop precisa enumerar turn x river, ~2300 combinações por
+  par de classes) e ainda **não validado** num spot real — só a
+  mecânica de turn foi validada até agora. Próximo passo: rodar/medir
+  num spot de flop de verdade antes de confiar no resultado.
 - ⏳ Squeeze (multiway) — arquitetura pronta (mesmo motor multiway
   acima), não validado num spot de squeeze de verdade ainda (só no
   caso degenerado de 2 jogadores).
