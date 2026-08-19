@@ -10,11 +10,14 @@ evita que uma mudança no motor quebre o deploy do produto.
   pré-flop com blockers (`equity.py`, `equity_blockers.py`,
   `equity_final.py`), classes de mão (`hand_classes.py`), ICM
   (`icm.py`), solver de shove/fold com e sem ICM (`pushfold.py`,
-  `pushfold_icm.py`).
+  `pushfold_icm.py`), motor pós-flop — river heads-up
+  (`postflop.py`, ver status abaixo).
 - `jobs/` — scripts de geração em lote, sobem resultado pro Supabase.
 - `api/` — API mínima (FastAPI) só pra disparar/monitorar jobs.
 - `tests/` — validação do núcleo CFR contra Kuhn Poker (solução
-  analítica conhecida) — rodar sempre que mexer em `cfr_core.py`.
+  analítica conhecida, rodar sempre que mexer em `cfr_core.py`) e do
+  motor de river contra a fórmula fechada de MDF
+  (`tests/postflop_river.py`).
 
 ## Setup local
 
@@ -119,9 +122,32 @@ await fetch(`${SOLVER_API_URL}/jobs/pushfold`, {
   Monte Carlo) — pensado pra rodar OFFLINE, no seu PC, por
   horas/dias/semanas, não no meu sandbox. Ver
   `run_offline_multiway.py` (tem checkpoint automático).
-- ⏳ 3-bet "de verdade" (não all-in) e pós-flop — não iniciado. A
-  árvore atual trata qualquer resposta a um raise como shove
-  (correto pra stack curto/médio, não serve pra stack profundo).
+- ⏳ 3-bet "de verdade" (não all-in) pré-flop — não iniciado. A árvore
+  de RFI atual trata qualquer resposta a um raise como shove (correto
+  pra stack curto/médio, não serve pra stack profundo).
+- ✅/⏳ **Pós-flop — river heads-up** (`engine/postflop.py`) — primeira
+  rua pós-flop real: dado um board fixo (5 cartas), range vs range
+  (por classe de mão) e tamanhos de aposta configuráveis, resolve a
+  árvore check/bet -> fold/call/raise(all-in) -> fold/call via CFR
+  exato (full-enumeration, sem amostragem, igual `pushfold.py`). Força
+  de mão calculada com o avaliador real (`treys`) direto no board —
+  sem Monte Carlo, já que no river o board está 100% definido.
+  **Validado contra fórmula fechada de teoria dos jogos**: no caso
+  clássico "range polarizada (valor puro + blefe puro) vs
+  bluff-catcher puro", a frequência de call do bluff-catcher batida
+  pelo CFR reproduz `MDF = pote/(pote+aposta)` com <1% de erro (ver
+  `tests/postflop_river.py`). Limitação conhecida (documentada,
+  mesmo espírito da aproximação já aceita em `hand_classes.py` pro
+  pré-flop): decisões são por classe de mão, não por combo — dois
+  combos da mesma classe (ex AhKh vs AsKs) têm a mesma frequência de
+  bet/call, sem discriminação de blocker dentro da classe. Raise é
+  limitado a um único tamanho (all-in), mesma simplificação do
+  pré-flop pra 3-bet/4-bet.
+- ⏳ Turn e flop — não iniciado. Diferente do river, essas ruas têm
+  carta por vir, então exigem nó de chance (turn/river runouts) sobre
+  a árvore de apostas já construída — provavelmente via amostragem
+  (MCCFR), no mesmo espírito da amostragem já usada no motor multiway
+  pra equity. Próximo passo natural depois do river.
 - ⏳ Squeeze (multiway) — arquitetura pronta (mesmo motor multiway
   acima), não validado num spot de squeeze de verdade ainda (só no
   caso degenerado de 2 jogadores).
