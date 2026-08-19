@@ -41,29 +41,21 @@ Rodar a API local:
 uvicorn api.main:app --reload
 ```
 
-## ⚠️ Pendente antes do primeiro job real: migration `solver_jobs`
+## ✅ Migration `solver_jobs` — feita
 
-A API grava status de job nessa tabela — ela **não existe ainda** no
-Supabase do PokerSync. Rodar manualmente no dashboard (nunca de forma
-automática, seguindo o mesmo cuidado do pipeline principal com
-alterações de schema):
+A tabela `public.solver_jobs` já existe no Supabase do PokerSync
+(criada manualmente no dashboard, conferida via
+`information_schema.columns`: `id`, `job_type`, `status`, `params`,
+`progress`, `error`, `created_at`, `updated_at` — bate com o que
+`api/main.py` e `jobs/solve_pushfold_batch.py` usam).
 
-```sql
-create table if not exists public.solver_jobs (
-  id uuid primary key,
-  job_type text not null,
-  status text not null default 'running',
-  params jsonb,
-  progress text,
-  error text,
-  created_at timestamptz not null default now(),
-  updated_at timestamptz
-);
-```
+✅ Schema real de `drills` também já foi conferido (via `list_tables`)
+contra o mapeamento em
+`jobs/solve_pushfold_batch.py::build_drill_row()` — bate coluna a
+coluna, nenhum ajuste necessário.
 
-✅ Schema real de `drills` já foi conferido (via `list_tables`) contra
-o mapeamento em `jobs/solve_pushfold_batch.py::build_drill_row()` —
-bate coluna a coluna, nenhum ajuste necessário.
+Ambas as pendências que bloqueavam o primeiro job real em produção
+estão resolvidas.
 
 ## Deploy (Railway)
 
