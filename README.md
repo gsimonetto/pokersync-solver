@@ -158,12 +158,22 @@ await fetch(`${SOLVER_API_URL}/jobs/pushfold`, {
     tamanho (all-in), mesma simplificação do pré-flop pra 3-bet/4-bet;
     (3) a carta sorteada nos nós de chance ignora blockers com as mãos
     específicas dos jogadores (só evita colidir com o board).
-- ⏳ **Flop** — tecnicamente já funciona com o mesmo `PostflopSolver`
-  (passando um board de 3 cartas), mas MUITO mais pesado (equity
-  all-in no flop precisa enumerar turn x river, ~2300 combinações por
-  par de classes) e ainda **não validado** num spot real — só a
-  mecânica de turn foi validada até agora. Próximo passo: rodar/medir
-  num spot de flop de verdade antes de confiar no resultado.
+- ⏳ **Flop** — rodei o mesmo `PostflopSolver` com board de 3 cartas
+  num spot de teste (`tests/postflop_flop_check.py`, exploratório, não
+  é suite de regressão) e **não convergiu** dentro de um tempo curto
+  (1500 iterações, ~2m40s): ficou ~16% longe da fórmula fechada de
+  MDF, contra <3% no turn. Causa provável: faltam 2 cartas (turn+
+  river), o que cria um leque de ~2300 combinações de continuação por
+  par de classes — cada uma precisa de várias visitas pra convergir, e
+  1500 iterações é pouco pra isso. Não achei bug na equity em si (o
+  cálculo exato de "correr o board" foi conferido e bate certo) nem na
+  árvore (o mesmo código, rodado só no turn com bet forçando all-in
+  imediato, também converge certinho). O que falta é rodar por MUITO
+  mais tempo — mesmo padrão já documentado no motor multiway: função
+  offline, no seu computador, por bastante tempo, não em uma sessão
+  curta. Próximo passo: rodar `PostflopSolver` num board de flop com
+  iterações bem mais altas (dezenas de milhares+) e medir de novo
+  antes de confiar no resultado.
 - ⏳ Squeeze (multiway) — arquitetura pronta (mesmo motor multiway
   acima), não validado num spot de squeeze de verdade ainda (só no
   caso degenerado de 2 jogadores).
