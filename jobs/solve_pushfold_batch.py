@@ -2,17 +2,14 @@
 Job de geração em lote: resolve spots de shove/fold (com ICM) e sobe
 o resultado pro Supabase, na tabela `drills`.
 
-IMPORTANTE — decisão em aberto antes de rodar isso contra o Supabase
-de produção: o mapeamento exato de colunas abaixo (`spot_id`,
-`gto_nodes`, etc) foi escrito seguindo a convenção que já existia nos
-dumps do TexasSolver, mas não foi confirmado contra o schema real via
-`information_schema.columns` (prática que o próprio pipeline anterior
-já usava e que vale manter). Antes do primeiro job real, rodar:
-
-    select column_name, data_type from information_schema.columns
-    where table_schema='public' and table_name='drills';
-
-e ajustar `build_drill_row()` se algo divergir.
+Mapeamento de colunas em `build_drill_row()` CONFERIDO contra o schema
+real da tabela (via `list_tables`/`information_schema.columns`) — bate
+exatamente (spot_id, board, pot, effective_stack, gto_nodes, solution,
+format, stack_bb, position, street, action, engine_version,
+exploitability, solver_job_id, generated_at). Ainda falta criar a
+tabela `solver_jobs` (usada por `api/main.py` e pelo update de
+progresso abaixo) — ver README, seção "Pendente antes do primeiro job
+real".
 
 Também adiciona (por decisão registrada): exploitability, config do
 motor e versão do engine em cada linha — é o log de convergência que
