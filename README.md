@@ -61,11 +61,9 @@ create table if not exists public.solver_jobs (
 );
 ```
 
-Também vale confirmar o schema real de `drills` (via
-`information_schema.columns`) antes do primeiro upload — o mapeamento
-em `jobs/solve_pushfold_batch.py::build_drill_row()` foi escrito
-seguindo a convenção do pipeline anterior (TexasSolver), mas não foi
-validado coluna a coluna contra a tabela real ainda.
+✅ Schema real de `drills` já foi conferido (via `list_tables`) contra
+o mapeamento em `jobs/solve_pushfold_batch.py::build_drill_row()` —
+bate coluna a coluna, nenhum ajuste necessário.
 
 ## Deploy (Railway)
 
