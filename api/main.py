@@ -5,6 +5,9 @@ ainda, isso fica pra quando o Hand Replayer precisar).
 
 Endpoints:
   POST /jobs/pushfold   -> dispara um job de geração de spots shove/fold
+  POST /jobs/rfi_jam    -> dispara um job de geração de spots RFI/jam
+                            (matchups já validados, ver MATCHUPS em
+                            jobs/solve_rfi_jam_batch.py)
   GET  /jobs/{job_id}   -> consulta status (tambem pode ser lido direto
                             do Supabase pela tabela `solver_jobs`, esse
                             endpoint existe só por conveniência/uniformidade)
@@ -22,6 +25,7 @@ from pydantic import BaseModel
 
 from jobs.supabase_client import get_client
 from jobs.solve_pushfold_batch import run_pushfold_batch
+from jobs.solve_rfi_jam_batch import run_rfi_jam_batch
 from engine.equity_final import build_final_equity_matrix
 
 app = FastAPI(title="PokerSync Solver API", version="0.1.0")
@@ -65,6 +69,59 @@ def create_pushfold_job(req: PushFoldJobRequest, background_tasks: BackgroundTas
                 payouts=req.payouts,
                 equity_matrix=equity_matrix,
                 classes=classes,
+                iterations=req.iterations,
+            )
+            client.table("solver_jobs").update({
+                "status": "done",
+                "updated_at": datetime.datetime.utcnow().isoformat(),
+            }).eq("id", job_id).execute()
+        except Exception as e:  # noqa: BLE001
+            client.table("solver_jobs").update({
+                "status": "error",
+                "error": str(e),
+                "updated_at": datetime.datetime.utcnow().isoformat(),
+            }).eq("id", job_id).execute()
+
+    background_tasks.add_task(_run)
+    return {"job_id": job_id, "status": "running"}
+
+
+class RfiJamJobRequest(BaseModel):
+    matchups: list[str]
+    stacks_bb: list[float]
+    other_stacks: list[float]
+    payouts: list[float]
+    open_size: float = 2.2
+    iterations: int = 2_500_000
+
+
+@app.post("/jobs/rfi_jam")
+def create_rfi_jam_job(req: RfiJamJobRequest, background_tasks: BackgroundTasks,
+                        x_api_key: Optional[str] = Header(default=None)):
+    check_api_key(x_api_key)
+
+    job_id = str(uuid.uuid4())
+    client = get_client()
+    client.table("solver_jobs").insert({
+        "id": job_id,
+        "job_type": "rfi_jam_icm_batch",
+        "status": "running",
+        "params": req.model_dump(),
+        "created_at": datetime.datetime.utcnow().isoformat(),
+    }).execute()
+
+    def _run():
+        try:
+            equity_matrix, classes, _stats = build_final_equity_matrix()
+            run_rfi_jam_batch(
+                job_id=job_id,
+                matchups=req.matchups,
+                stacks_bb=req.stacks_bb,
+                other_stacks=req.other_stacks,
+                payouts=req.payouts,
+                equity_matrix=equity_matrix,
+                classes=classes,
+                open_size=req.open_size,
                 iterations=req.iterations,
             )
             client.table("solver_jobs").update({
