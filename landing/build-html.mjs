@@ -7,6 +7,7 @@
  */
 import { build } from "vite";
 import react from "@vitejs/plugin-react";
+import tailwindcss from "@tailwindcss/vite";
 import { readFile, writeFile, rm } from "node:fs/promises";
 import { readdir } from "node:fs/promises";
 import path from "node:path";
@@ -15,7 +16,7 @@ const OUT_DIR = path.resolve("dist-inline");
 const TARGET = path.resolve("pokersync-landing.html");
 
 await build({
-  plugins: [react()],
+  plugins: [react(), tailwindcss()],
   logLevel: "warn",
   build: {
     outDir: OUT_DIR,
@@ -45,26 +46,26 @@ const html = `<!doctype html>
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta name="theme-color" content="#090d16" />
-    <title>PokerSync — Sua rotina de poker, tudo integrado em uma só plataforma</title>
+    <meta name="theme-color" content="#000000" />
+    <title>PokerSync — Organize. Estude. Evolua.</title>
     <meta
       name="description"
-      content="Abandone as 5 assinaturas separadas e as planilhas quebradas. Estude ranges, treine drills, revise mãos, gerencie sua banca e acompanhe seu time no único ecossistema 100% conectado."
+      content="Abandone as 5 assinaturas separadas e as planilhas quebradas. Treino, banca, revisão de mãos, ranges, time e evolução no único ecossistema 100% conectado."
     />
     <meta property="og:type" content="website" />
-    <meta property="og:title" content="PokerSync — Um único ecossistema. Sem atrito. Da teoria ao lucro." />
+    <meta property="og:title" content="PokerSync — Organize. Estude. Evolua." />
     <meta property="og:description" content="Estude ranges, treine drills, revise mãos, gerencie sua banca e acompanhe seu time em uma só plataforma." />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link
-      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap"
+      href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&display=swap"
       rel="stylesheet"
     />
     <style>
 ${css}
     </style>
   </head>
-  <body class="bg-abyss-900 antialiased">
+  <body class="bg-void text-ink antialiased">
     <div id="root"></div>
     <script>
 ${js}

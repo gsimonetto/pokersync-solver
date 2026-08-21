@@ -1,25 +1,21 @@
 import { motion } from "framer-motion";
 import { Twitter, Youtube, Instagram, MessageCircle } from "lucide-react";
 import Logo from "./ui/Logo.jsx";
+import { modules } from "../data/modules.js";
 import { fadeUp, staggerContainer, viewportOnce } from "../lib/motion.js";
 
 const columns = [
   {
     title: "Produto",
-    links: [
-      { label: "Modo Treino", href: "#treino" },
-      { label: "Gestor de Banca", href: "#banca" },
-      { label: "Revisor de Mãos", href: "#revisor" },
-      { label: "Construtor de Ranges", href: "#ranges" },
-      { label: "Player Evolution", href: "#evolution" },
-    ],
+    // Deriva dos módulos reais — footer não pode divergir do que existe no app.
+    links: modules.slice(0, 5).map((m) => ({ label: m.title, href: m.href })),
   },
   {
     title: "Para Times",
     links: [
-      { label: "Modo Time", href: "#times" },
+      { label: "Meu Time", href: "/time" },
+      { label: "Painel do coach", href: "/time/painel" },
       { label: "Staking e makeup", href: "#times" },
-      { label: "Relatórios de ROI", href: "#times" },
       { label: "Falar com vendas", href: "#cadastro" },
     ],
   },
@@ -28,7 +24,7 @@ const columns = [
     links: [
       { label: "Planos", href: "#planos" },
       { label: "Ecossistema", href: "#ecossistema" },
-      { label: "Blog e estudos", href: "#" },
+      { label: "Entrar", href: "/login" },
       { label: "Suporte", href: "#" },
     ],
   },
@@ -43,19 +39,19 @@ const socials = [
 
 export default function Footer() {
   return (
-    <footer className="relative border-t border-white/10 bg-abyss-950/80">
+    <footer className="border-t border-hairline">
       <motion.div
         variants={staggerContainer(0.08)}
         initial="hidden"
         whileInView="visible"
         viewport={viewportOnce}
-        className="mx-auto max-w-7xl px-4 py-14 sm:px-6 lg:px-8 lg:py-16"
+        className="mx-auto max-w-[1280px] px-6 py-14"
       >
         <div className="grid gap-10 lg:grid-cols-[1.4fr_repeat(3,1fr)]">
           <motion.div variants={fadeUp}>
-            <Logo />
-            <p className="mt-4 max-w-xs text-sm leading-relaxed text-slate-500">
-              Um único ecossistema. Sem atrito. Da teoria ao lucro.
+            <Logo className="h-7 w-auto" />
+            <p className="mt-4 max-w-xs text-sm leading-relaxed text-muted/70">
+              Organize. Estude. Evolua. Um único ecossistema, da teoria ao lucro.
             </p>
             <ul className="mt-6 flex items-center gap-2">
               {socials.map((social) => (
@@ -63,9 +59,9 @@ export default function Footer() {
                   <a
                     href={social.href}
                     aria-label={social.label}
-                    className="flex h-9 w-9 items-center justify-center rounded-lg border border-white/10 bg-white/[0.03] text-slate-400 transition-all duration-300 hover:border-emerald-500/30 hover:text-emerald-300"
+                    className="flex size-9 items-center justify-center rounded-lg border border-hairline bg-surface text-muted transition-colors hover:border-white/20 hover:bg-elevated hover:text-ink"
                   >
-                    <social.icon className="h-4 w-4" strokeWidth={1.8} />
+                    <social.icon size={15} />
                   </a>
                 </li>
               ))}
@@ -74,7 +70,7 @@ export default function Footer() {
 
           {columns.map((column) => (
             <motion.nav key={column.title} variants={fadeUp} aria-label={column.title}>
-              <h2 className="text-xs font-bold uppercase tracking-[0.14em] text-white">
+              <h2 className="text-[11px] font-semibold uppercase tracking-[0.18em] text-ink">
                 {column.title}
               </h2>
               <ul className="mt-4 space-y-2.5">
@@ -82,7 +78,7 @@ export default function Footer() {
                   <li key={link.label}>
                     <a
                       href={link.href}
-                      className="text-sm text-slate-500 transition-colors hover:text-emerald-300"
+                      className="text-sm text-muted/70 transition-colors hover:text-ink"
                     >
                       {link.label}
                     </a>
@@ -95,34 +91,31 @@ export default function Footer() {
 
         <motion.div
           variants={fadeUp}
-          className="mt-12 flex flex-col gap-4 border-t border-white/10 pt-8 sm:flex-row sm:items-center sm:justify-between"
+          className="mt-12 flex flex-col gap-4 border-t border-hairline pt-8 sm:flex-row sm:items-center sm:justify-between"
         >
-          <p className="text-xs text-slate-600">
+          <p className="text-xs text-muted/50">
             © {new Date().getFullYear()} PokerSync. Todos os direitos reservados.
           </p>
-          <ul className="flex flex-wrap items-center gap-x-6 gap-y-2 text-xs text-slate-600">
+          <ul className="flex flex-wrap items-center gap-x-6 gap-y-2 text-xs text-muted/50">
             <li>
-              <a href="#" className="transition-colors hover:text-slate-400">
+              <a href="#" className="transition-colors hover:text-muted">
                 Termos de uso
               </a>
             </li>
             <li>
-              <a href="#" className="transition-colors hover:text-slate-400">
+              <a href="#" className="transition-colors hover:text-muted">
                 Política de privacidade
               </a>
             </li>
             <li>
-              <a href="#" className="transition-colors hover:text-slate-400">
+              <a href="#" className="transition-colors hover:text-muted">
                 Jogo responsável
               </a>
             </li>
           </ul>
         </motion.div>
 
-        <motion.p
-          variants={fadeUp}
-          className="mt-8 max-w-4xl text-[11px] leading-relaxed text-slate-700"
-        >
+        <motion.p variants={fadeUp} className="mt-8 max-w-4xl text-[11px] leading-relaxed text-muted/40">
           O PokerSync é uma ferramenta de estudo, treino e gestão. Não
           garantimos resultados financeiros — desempenho passado não prevê
           desempenho futuro. Conteúdo destinado a maiores de 18 anos. Jogue com

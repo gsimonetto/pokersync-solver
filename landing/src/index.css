@@ -1,70 +1,165 @@
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
+@import "tailwindcss";
 
-@layer base {
-  :root {
-    color-scheme: dark;
-  }
+/* ---------------------------------------------------------------------------
+   Design system do PokerSync.
+   Tokens copiados de app/globals.css do repositório gsimonetto/pokersync —
+   qualquer mudança de identidade deve nascer lá e ser espelhada aqui.
+   --------------------------------------------------------------------------- */
 
-  html {
-    -webkit-tap-highlight-color: transparent;
-  }
-
-  body {
-    @apply bg-abyss-900 text-slate-300 font-sans;
-    font-feature-settings: "cv02", "cv03", "cv04", "ss01";
-  }
-
-  /* Compensa o header fixo ao navegar por âncoras. */
-  section[id] {
-    scroll-margin-top: 5.5rem;
-  }
-
-  ::selection {
-    @apply bg-emerald-500/30 text-emerald-100;
-  }
-
-  ::-webkit-scrollbar {
-    width: 10px;
-  }
-  ::-webkit-scrollbar-track {
-    @apply bg-abyss-950;
-  }
-  ::-webkit-scrollbar-thumb {
-    @apply bg-white/10 rounded-full border-2 border-abyss-950;
-  }
-  ::-webkit-scrollbar-thumb:hover {
-    @apply bg-emerald-500/40;
-  }
+@theme {
+  --color-void: #000000;
+  --color-surface: #111111;
+  --color-elevated: #1e1e1e;
+  --color-ink: #ffffff;
+  --color-muted: #c4c7c8;
+  --color-hairline: rgba(255, 255, 255, 0.08);
+  --color-positive: #22c55e;
+  --color-negative: #e0555a;
+  --color-training: #3b82f6;
+  --color-evolution: #f59e0b;
+  --color-review: #a855f7;
+  --font-sans: "Space Grotesk", ui-sans-serif, system-ui, sans-serif;
 }
 
-@layer components {
-  /* Superfície glassmorphism padrão do design system PokerSync. */
-  .glass-panel {
-    @apply relative rounded-2xl border border-white/10 bg-white/[0.03] backdrop-blur-md;
-  }
+:root {
+  color-scheme: dark;
+  --background: #000000;
+  --foreground: #ffffff;
+}
 
-  .glass-panel-emerald {
-    @apply relative rounded-2xl border border-emerald-500/20 bg-gradient-to-b from-emerald-500/[0.07] to-white/[0.02] backdrop-blur-md;
-  }
+html,
+body {
+  background: var(--background);
+  color: var(--foreground);
+}
 
-  /* Texto de gradiente para headlines de alto impacto. */
-  .text-gradient-emerald {
-    @apply bg-gradient-to-br from-emerald-300 via-emerald-400 to-teal-500 bg-clip-text text-transparent;
-  }
+body {
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+}
 
-  .text-gradient-light {
-    @apply bg-gradient-to-br from-white via-slate-100 to-slate-400 bg-clip-text text-transparent;
-  }
+/* Seleção branca sobre preto — mesmo padrão da tela de login. */
+::selection {
+  background: #ffffff;
+  color: #000000;
+}
 
-  /* Números tabulares para métricas financeiras (evita "dança" de dígitos). */
-  .tabular {
-    font-variant-numeric: tabular-nums;
+/* Compensa o header fixo ao navegar por âncoras. */
+section[id] {
+  scroll-margin-top: 5rem;
+}
+
+/* Barra de rolagem fina, sem os botões de seta do tema escuro nativo. */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--color-hairline) transparent;
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background-color: rgba(255, 255, 255, 0.14);
+  border-radius: 999px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+::-webkit-scrollbar-thumb:hover {
+  background-color: rgba(255, 255, 255, 0.24);
+}
+::-webkit-scrollbar-button {
+  display: none;
+  width: 0;
+  height: 0;
+}
+
+.tnum {
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---------------------------------------------------------------------------
+   Sistema de acento: a cor vem da custom property --acc definida inline no
+   elemento. Idêntico ao do produto — é o que faz cada módulo ter identidade
+   própria sem multiplicar classes.
+   --------------------------------------------------------------------------- */
+
+.acc-card {
+  transition:
+    border-color 0.2s ease,
+    box-shadow 0.2s ease,
+    transform 0.2s ease;
+}
+.acc-card:hover,
+.acc-card.is-active {
+  border-color: var(--acc);
+  box-shadow: 0 12px 34px -10px var(--acc);
+}
+.acc-lift:hover,
+.acc-lift.is-active {
+  transform: translateY(-2px);
+}
+
+.acc-glow {
+  background: var(--acc);
+  opacity: 0;
+  transition: opacity 0.3s ease;
+}
+.group:hover .acc-glow,
+.group.is-active .acc-glow {
+  opacity: 0.22;
+}
+.group:hover .acc-fg,
+.group.is-active .acc-fg {
+  color: var(--acc);
+}
+.group:hover .acc-bg,
+.group.is-active .acc-bg {
+  background-color: var(--acc);
+}
+.group:hover .acc-border,
+.group.is-active .acc-border {
+  border-color: var(--acc);
+}
+.group:hover .acc-bar,
+.group.is-active .acc-bar {
+  background-color: var(--acc);
+  box-shadow: 0 0 14px var(--acc);
+}
+.acc-fg,
+.acc-bg,
+.acc-border,
+.acc-bar {
+  transition:
+    color 0.25s ease,
+    background-color 0.25s ease,
+    border-color 0.25s ease,
+    box-shadow 0.25s ease;
+}
+
+/* "Respiração" leve em brilhos decorativos — ciclo longo, variação pequena. */
+@keyframes glow-breathe {
+  0%,
+  100% {
+    opacity: 0.55;
+    transform: scale(1);
   }
+  50% {
+    opacity: 0.85;
+    transform: scale(1.06);
+  }
+}
+.glow-breathe {
+  animation: glow-breathe 5s ease-in-out infinite;
 }
 
 @media (prefers-reduced-motion: reduce) {
+  .glow-breathe {
+    animation: none;
+  }
   *,
   *::before,
   *::after {
@@ -73,4 +168,11 @@
     transition-duration: 0.01ms !important;
     scroll-behavior: auto !important;
   }
+}
+
+/* Trama de pontos do ambiente (login/hero) — 32px, opacidade baixíssima. */
+.dot-grid {
+  background-image: radial-gradient(#ffffff 1px, transparent 1px);
+  background-size: 32px 32px;
+  opacity: 0.04;
 }

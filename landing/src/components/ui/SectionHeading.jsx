@@ -1,11 +1,10 @@
 import { motion } from "framer-motion";
-import Badge from "./Badge.jsx";
+import Eyebrow from "./Eyebrow.jsx";
 import { fadeUp, staggerContainer, viewportOnce } from "../../lib/motion.js";
 
-/** Cabeçalho padrão de seção: eyebrow + título + subtítulo, com stagger no scroll. */
+/** Cabeçalho padrão de seção: eyebrow + título + descrição, com stagger. */
 export default function SectionHeading({
   eyebrow,
-  eyebrowIcon,
   title,
   highlight,
   description,
@@ -25,24 +24,22 @@ export default function SectionHeading({
     >
       {eyebrow ? (
         <motion.div variants={fadeUp}>
-          <Badge icon={eyebrowIcon}>{eyebrow}</Badge>
+          <Eyebrow>{eyebrow}</Eyebrow>
         </motion.div>
       ) : null}
 
       <motion.h2
         variants={fadeUp}
-        className="mt-5 max-w-3xl text-3xl font-extrabold tracking-tight text-white sm:text-4xl lg:text-[2.75rem] lg:leading-[1.1]"
+        className="mt-3 max-w-3xl text-3xl font-bold tracking-tight text-ink sm:text-4xl"
       >
         {title}{" "}
-        {highlight ? (
-          <span className="text-gradient-emerald">{highlight}</span>
-        ) : null}
+        {highlight ? <span className="text-muted">{highlight}</span> : null}
       </motion.h2>
 
       {description ? (
         <motion.p
           variants={fadeUp}
-          className="mt-5 max-w-2xl text-base leading-relaxed text-slate-400 sm:text-lg"
+          className="mt-4 max-w-2xl text-sm leading-relaxed text-muted sm:text-base"
         >
           {description}
         </motion.p>

@@ -1,26 +1,24 @@
 const base =
-  "inline-flex items-center justify-center gap-2 rounded-xl font-semibold transition-all duration-300 focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400/70 focus-visible:ring-offset-2 focus-visible:ring-offset-abyss-900 disabled:opacity-60";
+  "inline-flex items-center justify-center gap-2 rounded-lg font-semibold transition-all cursor-pointer focus:outline-none focus-visible:ring-2 focus-visible:ring-ink/70 focus-visible:ring-offset-2 focus-visible:ring-offset-void disabled:opacity-50 disabled:cursor-not-allowed";
 
+/**
+ * Hierarquia de ação do produto: a ação primária é BRANCA sobre preto
+ * (mesmo botão da tela de login). Cor viva nunca é usada em CTA — ela é
+ * reservada para o acento de módulo.
+ */
 const variants = {
-  primary:
-    "bg-emerald-500 text-abyss-950 shadow-glow hover:bg-emerald-400 hover:shadow-glow-lg active:scale-[0.98]",
+  primary: "bg-ink text-void shadow-lg shadow-black/40 hover:bg-white/90",
   outline:
-    "border border-white/15 bg-white/[0.03] text-slate-100 backdrop-blur-md hover:border-emerald-500/40 hover:bg-emerald-500/[0.08] hover:text-white active:scale-[0.98]",
-  ghost: "text-slate-300 hover:text-white",
-  indigo:
-    "bg-indigo-500 text-white shadow-glow-indigo hover:bg-indigo-400 active:scale-[0.98]",
+    "border border-hairline bg-surface text-ink hover:border-white/20 hover:bg-elevated",
+  ghost: "text-muted hover:text-ink",
 };
 
 const sizes = {
   sm: "px-4 py-2 text-sm",
-  md: "px-5 py-2.5 text-sm",
-  lg: "px-7 py-3.5 text-base",
+  md: "px-4 py-2.5 text-sm",
+  lg: "px-6 py-3 text-[15px]",
 };
 
-/**
- * Botão polimórfico: renderiza `<a>` quando recebe `href`, `<button>` caso contrário.
- * Mantém a hierarquia de conversão (primary = verde neon) consistente na página.
- */
 export default function Button({
   as,
   href,

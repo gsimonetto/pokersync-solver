@@ -1,7 +1,7 @@
 import { motion } from "framer-motion";
-import { ArrowRight, PlayCircle, Sparkles, ShieldCheck } from "lucide-react";
+import { ArrowRight, PlayCircle, Check } from "lucide-react";
 import Button from "./ui/Button.jsx";
-import Badge from "./ui/Badge.jsx";
+import Eyebrow from "./ui/Eyebrow.jsx";
 import DashboardMockup from "./DashboardMockup.jsx";
 import { fadeUp, staggerContainer } from "../lib/motion.js";
 
@@ -13,86 +13,64 @@ const proofPoints = [
 
 export default function Hero() {
   return (
-    <section
-      id="top"
-      className="relative overflow-hidden pb-20 pt-28 sm:pt-32 lg:pb-28 lg:pt-40"
-    >
-      {/* Camadas de ambiente: grid técnico + halos radiais */}
+    <section id="top" className="relative overflow-hidden pb-20 pt-28 lg:pb-28 lg:pt-36">
+      {/* Ambiente da marca: trama de pontos + blobs brancos difusos */}
+      <div aria-hidden="true" className="dot-grid pointer-events-none absolute inset-0" />
       <div
         aria-hidden="true"
-        className="pointer-events-none absolute inset-0 bg-grid-fade bg-grid [mask-image:radial-gradient(ellipse_70%_55%_at_50%_0%,#000_35%,transparent_100%)]"
-      />
-      <div
-        aria-hidden="true"
-        className="pointer-events-none absolute left-1/2 top-[-14rem] h-[34rem] w-[34rem] -translate-x-1/2 rounded-full bg-emerald-500/15 blur-[120px]"
-      />
-      <div
-        aria-hidden="true"
-        className="pointer-events-none absolute right-[-10rem] top-40 h-[26rem] w-[26rem] rounded-full bg-indigo-600/15 blur-[120px]"
+        className="glow-breathe pointer-events-none absolute -top-40 left-1/2 size-[36rem] -translate-x-1/2 rounded-full bg-white/[0.06] blur-[140px]"
       />
 
-      <div className="relative mx-auto max-w-7xl px-4 sm:px-6 lg:px-8">
+      <div className="relative mx-auto max-w-[1280px] px-6">
         <motion.div
           variants={staggerContainer(0.1, 0.05)}
           initial="hidden"
           animate="visible"
-          className="mx-auto flex max-w-4xl flex-col items-center text-center"
+          className="mx-auto flex max-w-3xl flex-col items-center text-center"
         >
           <motion.div variants={fadeUp}>
-            <Badge icon={Sparkles}>O fim da roda da fragmentação</Badge>
+            <Eyebrow>O fim da roda da fragmentação</Eyebrow>
           </motion.div>
 
           <motion.h1
             variants={fadeUp}
-            className="mt-6 text-4xl font-extrabold leading-[1.08] tracking-tight text-white sm:text-5xl lg:text-6xl xl:text-[4.25rem]"
+            className="mt-4 text-[2rem] font-bold leading-[1.12] tracking-tight text-ink sm:text-5xl"
           >
             Sua rotina de poker.{" "}
-            <span className="text-gradient-emerald">
-              Tudo integrado em uma só plataforma.
-            </span>
+            <span className="text-muted">Tudo integrado em uma só plataforma.</span>
           </motion.h1>
 
           <motion.p
             variants={fadeUp}
-            className="mt-6 max-w-2xl text-base leading-relaxed text-slate-400 sm:text-lg lg:text-xl"
+            className="mt-6 max-w-2xl text-base leading-relaxed text-muted sm:text-lg"
           >
             Abandone as 5 assinaturas separadas e as planilhas quebradas. Estude
             ranges, treine drills, revise mãos, gerencie sua banca e acompanhe
             seu time no único ecossistema{" "}
-            <span className="font-semibold text-slate-200">100% conectado</span>.
+            <span className="font-semibold text-ink">100% conectado</span>.
           </motion.p>
 
           <motion.div
             variants={fadeUp}
-            className="mt-9 flex w-full flex-col items-center gap-3 sm:w-auto sm:flex-row"
+            className="mt-8 flex w-full flex-col items-center gap-3 sm:w-auto sm:flex-row"
           >
-            <Button
-              href="#cadastro"
-              variant="primary"
-              size="lg"
-              className="w-full animate-pulse-ring sm:w-auto"
-            >
+            <Button href="#cadastro" variant="primary" size="lg" className="w-full sm:w-auto">
               Experimente o PokerSync Grátis
-              <ArrowRight className="h-5 w-5" strokeWidth={2.2} />
+              <ArrowRight size={18} />
             </Button>
-            <Button
-              href="#ecossistema"
-              variant="outline"
-              size="lg"
-              className="w-full sm:w-auto"
-            >
-              <PlayCircle className="h-5 w-5" strokeWidth={2} />
+            <Button href="#ecossistema" variant="outline" size="lg" className="w-full sm:w-auto">
+              <PlayCircle size={18} />
               Ver demonstração interativa
             </Button>
           </motion.div>
 
           <motion.ul
             variants={fadeUp}
-            className="mt-7 flex flex-wrap items-center justify-center gap-x-6 gap-y-2 text-xs text-slate-500 sm:text-sm"
+            className="mt-7 flex flex-wrap items-center justify-center gap-x-6 gap-y-2 text-xs text-muted/70"
           >
             {proofPoints.map((point) => (
               <li key={point} className="flex items-center gap-1.5">
-                <ShieldCheck className="h-4 w-4 text-emerald-500/70" strokeWidth={2} />
+                <Check size={14} className="text-positive" />
                 {point}
               </li>
             ))}

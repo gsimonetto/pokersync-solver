@@ -3,7 +3,8 @@
 Landing page oficial de conversão do **PokerSync**: o ecossistema unificado
 de alta performance para jogadores e times de poker.
 
-Stack: **React 18 + Vite + Tailwind CSS + Framer Motion + Lucide React**.
+Stack: **React 18 + Vite + Tailwind CSS v4 + Framer Motion + Lucide React** —
+mesma linguagem visual do produto (`gsimonetto/pokersync`, Next.js 15).
 
 ## Rodar localmente
 
@@ -59,29 +60,43 @@ src/
     Hero.jsx                  Headline, CTAs e prova social
     DashboardMockup.jsx       Mock animado do app (KPIs, curva de EV, range)
     EcosystemCycle.jsx        Diagrama interativo do ciclo integrado
-    ModulesGrid.jsx           Grid 3x2 dos módulos
+    ModulesGrid.jsx           Grid dos 7 módulos reais
     ModuleCard.jsx            Card individual: dor → valor → métrica → CTA
     TeamMode.jsx              Seção B2B (staking / cavalariças)
     ComparisonTable.jsx       5 softwares vs. PokerSync
     FinalCTA.jsx              Fechamento + captura de e-mail
     Footer.jsx                Links institucionais, sociais e aviso legal
-    ui/                       Button, Badge, Logo, SectionHeading
+    ui/                       Button, Chip, Eyebrow, Logo, Rings, SectionHeading
 ```
 
-## Design system aplicado
+## Identidade visual — fonte da verdade
 
-| Token | Uso |
+**Nada de design nasce aqui.** Todos os tokens, cores e padrões vêm do
+produto (`gsimonetto/pokersync`). Se a identidade mudar, ela muda lá e é
+espelhada aqui.
+
+| O que | De onde veio |
 | --- | --- |
-| `abyss-900` (`#090d16`) | Fundo base; `abyss-950` para faixas alternadas |
-| `emerald-500` | Ações de conversão, lucro e EV positivo |
-| `indigo-500` | Badges, estatísticas e linguagem de "ecossistema" |
-| `.glass-panel` | Superfície glassmorphism (`border-white/10` + `backdrop-blur-md`) |
-| `.tabular` | Números financeiros com largura fixa (evita "dança" de dígitos) |
+| Tokens `@theme` (void/surface/elevated/ink/muted/hairline/positive/negative) | `app/globals.css` |
+| Utilitários de acento `.acc-card`, `.acc-glow`, `.acc-fg`, `.acc-bar`, `.tnum`, `glow-breathe` | `app/globals.css` |
+| Paleta `ACCENT` e os 7 módulos (título, subtítulo, ícone, cor, rota) | `lib/modules-data.tsx` |
+| Logo `pokersync-logo.svg` | `public/` |
+| Fonte Space Grotesk | `app/layout.tsx` |
+| Card de módulo + `is-active` no toque | `components/module-card.tsx`, `components/module-card-shell.tsx` |
+| `Chip` (pill com glow na cor) | `components/chip.tsx` |
+| Anéis tracejados, trama de pontos, eyebrow em caixa alta | `components/welcome-hero.tsx`, `app/login/login-form.tsx` |
+| Botão primário branco sobre preto | `app/login/login-form.tsx` |
+| Matriz de ranges (gradiente fold → call → raise) | `components/ranges/range-grid.tsx` (`cellBackground`) |
 
-Animações: entradas de 0.5–0.7s com easing `[0.22, 1, 0.36, 1]`, stagger
-de ~0.09s e `viewport={{ once: true }}` — a página nunca re-anima no
-scroll de volta. Todas as animações são desligadas sob
-`prefers-reduced-motion: reduce`.
+### Regras da marca que a landing respeita
+
+1. **Fundo preto puro** (`#000`), superfícies em `#111` e `#1e1e1e`,
+   divisórias em branco a 8%.
+2. **Ação primária é branca**, nunca colorida — cor viva é identidade de
+   módulo, não de botão.
+3. **Cada módulo tem um acento próprio** aplicado via `--acc`; a landing
+   usa exatamente as cores já atribuídas no produto.
+4. **Números sempre com `.tnum`** (largura fixa, evita "dança" de dígitos).
 
 ## Pontos de integração
 

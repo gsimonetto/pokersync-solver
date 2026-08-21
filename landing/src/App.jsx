@@ -9,10 +9,10 @@ import Footer from "./components/Footer.jsx";
 
 export default function App() {
   return (
-    <div className="relative min-h-screen overflow-x-hidden bg-abyss-900">
+    <div className="relative min-h-screen overflow-x-hidden bg-void">
       <a
         href="#modulos"
-        className="sr-only focus:not-sr-only focus:absolute focus:left-4 focus:top-4 focus:z-[60] focus:rounded-lg focus:bg-emerald-500 focus:px-4 focus:py-2 focus:text-sm focus:font-semibold focus:text-abyss-950"
+        className="sr-only focus:not-sr-only focus:absolute focus:left-4 focus:top-4 focus:z-[60] focus:rounded-lg focus:bg-ink focus:px-4 focus:py-2 focus:text-sm focus:font-semibold focus:text-void"
       >
         Pular para o conteúdo
       </a>

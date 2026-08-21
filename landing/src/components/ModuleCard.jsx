@@ -1,70 +1,83 @@
+import { useCallback, useState } from "react";
 import { motion } from "framer-motion";
 import { ArrowRight } from "lucide-react";
-import { accentStyles } from "../data/modules.js";
 import { fadeUp } from "../lib/motion.js";
 
-/** Card de módulo: dor → valor → micro-métrica → CTA individual. */
+/**
+ * Card de módulo da landing. Reaproveita o ModuleCardShell do produto:
+ * a cor vem da custom property `--acc` e os utilitários `.acc-*` fazem
+ * borda, glow, ícone e barra reagirem juntos. `is-active` replica o hover
+ * no toque, onde :hover não existe.
+ */
 export default function ModuleCard({ module }) {
-  const accent = accentStyles[module.accent];
+  const [active, setActive] = useState(false);
   const Icon = module.icon;
+
+  const onPointerDown = useCallback((event) => {
+    if (event.pointerType !== "mouse") setActive(true);
+  }, []);
+
+  const endTouch = useCallback((event) => {
+    if (event.pointerType !== "mouse") {
+      window.setTimeout(() => setActive(false), 180);
+    }
+  }, []);
 
   return (
     <motion.article
       variants={fadeUp}
-      whileHover={{ y: -6 }}
-      transition={{ type: "spring", stiffness: 300, damping: 24 }}
-      className={`group relative flex h-full flex-col overflow-hidden rounded-2xl border border-white/10 bg-white/[0.025] p-6 backdrop-blur-md transition-all duration-500 ${accent.hoverBorder} ${accent.glow}`}
+      style={{ "--acc": module.accent }}
+      onPointerDown={onPointerDown}
+      onPointerUp={endTouch}
+      onPointerCancel={endTouch}
+      className={`group acc-card acc-lift relative flex h-full cursor-pointer flex-col overflow-hidden rounded-xl border border-hairline bg-surface p-5 ${
+        active ? "is-active" : ""
+      }`}
     >
-      {/* Brilho radial que acompanha o hover */}
-      <span
+      {/* Blob de brilho ambiente atrás do ícone. */}
+      <div
         aria-hidden="true"
-        className={`pointer-events-none absolute -right-16 -top-16 h-40 w-40 rounded-full opacity-0 blur-3xl transition-opacity duration-500 group-hover:opacity-100 ${accent.ring}`}
+        className="acc-glow pointer-events-none absolute -left-10 -top-10 size-32 rounded-full blur-2xl"
       />
 
-      <div className="relative flex items-start justify-between gap-4">
-        <span
-          className={`flex h-12 w-12 items-center justify-center rounded-xl border bg-gradient-to-br transition-transform duration-500 group-hover:scale-110 ${accent.iconWrap}`}
-        >
-          <Icon className="h-5 w-5" strokeWidth={1.8} />
-        </span>
-        <span
-          className={`rounded-full border px-2.5 py-1 text-[10px] font-bold uppercase tracking-[0.12em] ${accent.badge}`}
-        >
-          {module.badge}
+      <div className="relative flex items-start justify-between gap-2">
+        <div className="acc-border flex size-10 items-center justify-center rounded-lg border border-hairline bg-elevated">
+          <Icon size={20} className="acc-fg text-muted" />
+        </div>
+        <span className="acc-fg acc-border rounded-full border border-hairline px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide text-muted/70">
+          {module.subtitle}
         </span>
       </div>
 
-      <h3 className="relative mt-5 text-lg font-bold leading-snug text-white">
-        {module.title}
-      </h3>
+      <div className="relative mt-4">
+        <h3 className="acc-fg text-base font-semibold text-ink">{module.title}</h3>
+        <p className="mt-2 text-sm leading-relaxed text-muted">{module.value}</p>
+        <p className="mt-3 border-l border-hairline pl-3 text-xs leading-relaxed text-muted/60">
+          <span className="font-semibold text-muted">Sem PokerSync:</span> {module.pain}
+        </p>
+      </div>
 
-      <p className="relative mt-3 text-sm leading-relaxed text-slate-400">
-        {module.value}
-      </p>
-
-      <p className="relative mt-3 border-l-2 border-white/10 pl-3 text-xs leading-relaxed text-slate-500 transition-colors duration-500 group-hover:border-white/20">
-        <span className="font-semibold text-slate-400">Sem PokerSync:</span>{" "}
-        {module.pain}
-      </p>
-
-      <div className="relative mt-auto pt-6">
-        <div className="flex items-baseline gap-2">
-          <span className={`tabular text-2xl font-extrabold ${accent.metric}`}>
-            {module.metric}
-          </span>
-          <span className="text-xs text-slate-500">{module.metricLabel}</span>
+      <div className="relative mt-auto pt-5">
+        {/* Barra que acende na cor do módulo — mesmo padrão .acc-bar do produto. */}
+        <div className="acc-bar mb-4 h-px w-full bg-hairline" />
+        <div className="flex items-end justify-between gap-3">
+          <div>
+            <span className="tnum acc-fg block text-xl font-bold text-ink">
+              {module.metric}
+            </span>
+            <span className="text-[11px] text-muted/60">{module.metricLabel}</span>
+          </div>
+          <a
+            href={module.href}
+            className="acc-fg inline-flex shrink-0 items-center gap-1 text-xs font-semibold text-muted transition-colors"
+          >
+            {module.cta}
+            <ArrowRight
+              size={13}
+              className="transition-transform duration-200 group-hover:translate-x-0.5"
+            />
+          </a>
         </div>
-
-        <a
-          href={module.href}
-          className={`mt-4 inline-flex items-center gap-1.5 text-sm font-semibold transition-colors ${accent.cta}`}
-        >
-          {module.cta}
-          <ArrowRight
-            className="h-4 w-4 transition-transform duration-300 group-hover:translate-x-1"
-            strokeWidth={2.2}
-          />
-        </a>
       </div>
     </motion.article>
   );
