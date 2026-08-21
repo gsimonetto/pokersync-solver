@@ -143,17 +143,35 @@ await fetch(`${SOLVER_API_URL}/jobs/pushfold`, {
     `tests/postflop_turn.py`). O cálculo de equity all-in no turn
     (`runout_equity`) também foi cross-validado byte-a-byte contra
     uma reimplementação independente (diff exato = 0).
-  - **Exploitability rigorosa via best-response exato** (só pro river
-    por enquanto — `PostflopSolver.compute_exploitability()`, mesmo
-    padrão de `tests/kuhn_poker.py` e
+  - **Exploitability rigorosa via best-response exato, agora pra
+    QUALQUER rua** (river, turn ou flop — `PostflopSolver.compute_exploitability()`,
+    mesmo padrão de `tests/kuhn_poker.py` e
     `engine/rfi_jam.py::compute_exploitability`, mas cobrindo a árvore
     inteira, não só uma decisão isolada como o teste de MDF): testado
     no mesmo spot polarizado-vs-bluffcatcher, exploitability ficou em
-    0,39% do pote — ver `tests/postflop_exploitability.py`. Detalhe de
-    implementação: a convenção de contabilidade do motor faz
+    0,39% do pote no river — ver `tests/postflop_exploitability.py`.
+    Detalhe de implementação: a convenção de contabilidade do motor faz
     `br_oop + br_ip` somar sempre `pot0` num equilíbrio perfeito (não
     0 como em Kuhn Poker), então `compute_exploitability()` já
     devolve o valor com essa constante subtraída.
+    (2026-08) Generalizado pra board incompleto (turn/flop): a
+    recursão espelha exatamente a árvore de treino
+    (`_br_bet_or_check`/`_br_facing_bet`/`_br_facing_raise`/`_br_end_of_action`),
+    mas nos nós de chance enumera EXATAMENTE todas as cartas que faltam
+    (não amostra 1 como o treino) — mais pesado, mas exato. Quando a
+    recursão chega num infoset nunca visitado no treino (comum no
+    flop), a classe correspondente do oponente é EXCLUÍDA do cálculo
+    (peso zero) em vez de assumir um comportamento padrão tipo "sempre
+    folda" — evita viesar o resultado numa direção sem justificativa.
+    Validado em 3 camadas antes de confiar no resultado: (1) reproduz
+    exatamente os 0,39% do pote do river (mesmo código, board de 5
+    cartas nunca cria nó de chance); (2) no turn, roda em <1s e a
+    exploitability cai de forma monotônica com mais treino (3,77% em
+    3k iterações → 1,60% em 10k → 0,82% em 30k), com o número de
+    infosets estável (2175) — sinal de que a árvore inteira já é
+    descoberta cedo e a queda vem de refinamento de estratégia, não de
+    viés por infoset faltante; (3) aplicado ao próprio spot do flop
+    (ver item "Flop" abaixo) pra responder de vez a dúvida do AA/KK.
   - Limitações conhecidas (documentadas): (1) decisões são por classe
     de mão, não por combo — sem discriminação de blocker dentro da
     classe (mesmo espírito da aproximação já aceita em
@@ -161,9 +179,11 @@ await fetch(`${SOLVER_API_URL}/jobs/pushfold`, {
     tamanho (all-in), mesma simplificação do pré-flop pra 3-bet/4-bet;
     (3) a carta sorteada nos nós de chance ignora blockers com as mãos
     específicas dos jogadores (só evita colidir com o board).
-- ⏳/✅ **Flop** — performance corrigida e verificada (2026-08); a
-  validação em si segue parcial (métrica principal ok, uma métrica
-  secundária ainda em aberto). Três achados:
+- ⏳/✅ **Flop** — performance corrigida e verificada (2026-08); métrica
+  principal (MDF) validada, métrica secundária (freq. de aposta de
+  AA/KK) explicada via exploitability rigorosa (convergência lenta
+  confirmada, não bug) mas o spot em si ainda não converge o
+  suficiente pra virar validação formal. Três achados:
   1. **Bug de performance corrigido em `engine/cfr_core.py`**
      (`DiscountedCFRTrainer.discount`): a cada iteração, o código
      varria TODOS os infosets já criados pra aplicar o desconto —
@@ -192,26 +212,29 @@ await fetch(`${SOLVER_API_URL}/jobs/pushfold`, {
      estabilizou** mesmo em 150k iterações -- ficou subindo de forma
      ruidosa (AA: 19% em 5k -> 62% em 100k -> ainda subindo em 150k).
      O comentário do teste espera "quase sempre" pras mãos de valor, o
-     que não bateu. Investigação: o regret_sum acumulado de "check" e
-     "bet" fica sempre positivo e da mesma ordem de grandeza nos dois
-     (nenhum domina o outro claramente), e o regret médio por iteração
-     é pequeno (< 0.1% do pote) -- consistente com quase-indiferença
-     entre as duas ações nesse spot específico, não com erro de
-     cálculo. Hipótese mais provável: o IP desse teste só tem UMA
-     classe de mão (QQ), não um range real -- contra um range travado
-     assim, apostar vs. dar check com o nut pode genuinamente valer
-     quase o mesmo, e a variância de sortear 2 cartas por chance node
-     (turn+river) torna esse empate técnico ainda mais lento pra
-     "decidir" que qualquer decisão bem definida por uma fórmula fechada
-     (como a MDF acima). **Não é uma confirmação de bug, mas também não
-     é uma confirmação de que está certo** -- falta uma ferramenta de
-     exploitability rigorosa pra board incompleto (hoje só existe pro
-     river, `compute_exploitability()`) pra fechar essa dúvida de vez.
-     Próximo passo, se for continuar: (a) rodar um range de IP mais
-     realista (não uma classe só) e ver se a frequência de AA/KK
-     estabiliza mais rápido, ou (b) estender `compute_exploitability()`
-     pra cobrir board de 3/4 cartas (exigiria enumerar os nós de
-     chance exatamente, não por amostragem).
+     que não bateu. Investigação inicial: o regret_sum acumulado de
+     "check" e "bet" fica sempre positivo e da mesma ordem de grandeza
+     nos dois (nenhum domina o outro claramente), consistente com
+     quase-indiferença entre as duas ações nesse spot específico, não
+     com erro de cálculo -- mas isso sozinho não provava nada.
+     **(2026-08) Resolvido com exploitability rigorosa** (ver item
+     acima): rodando `compute_exploitability()` (agora generalizado pra
+     board incompleto) nesse mesmo spot do flop, com 5k/20k/50k
+     iterações de treino, a exploitability cai de forma monotônica --
+     85,16% do pote (5k) -> 33,82% (20k) -> 14,32% (50k) -- com o
+     número de infosets praticamente estável entre 20k e 50k (272663 ->
+     272700, cresceu <0,03%). Isso confirma a hipótese: **não é bug,
+     é convergência genuinamente lenta** nesse spot (o IP só ter UMA
+     classe de mão, e o flop sortear 2 cartas por chance node, tornam
+     o equilíbrio mais lento de alcançar) -- a queda é suave e
+     consistente, não estagnada nem oscilando, só ainda longe de zero
+     em 50k. Não dá pra tratar o teste como validado ainda (14% de
+     exploitability é alto), mas a ferramenta agora existe pra medir
+     isso de verdade em vez de confiar só na métrica proxy de
+     frequência de aposta -- próximo passo, se for continuar
+     investigando esse spot específico: rodar bem mais iterações (ex:
+     200k+) e/ou testar com um range de IP mais realista (não uma
+     classe só) pra ver se converge mais rápido.
 - ⏳ Squeeze (multiway) — arquitetura pronta (mesmo motor multiway
   acima), não validado num spot de squeeze de verdade ainda (só no
   caso degenerado de 2 jogadores).

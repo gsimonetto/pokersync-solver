@@ -66,10 +66,13 @@ if __name__ == "__main__":
     aa_bet = 1 - strat["oop"]["AA"]["check"]
     kk_bet = 1 - strat["oop"]["KK"]["check"]
     # NAO estabiliza nem com 150k iteracoes (medido 2026-08: 19% em 5k
-    # -> 62% em 100k, ainda subindo) -- regret_sum de check/bet fica
-    # sempre positivo e da mesma ordem nos dois, sugerindo quase-
-    # indiferenca nesse spot (IP so' tem 1 classe de mao, nao um range
-    # real) mais do que erro de calculo, mas isso NAO esta confirmado
-    # (falta exploitability rigorosa pra board incompleto). Ver README.
-    # Nao tratar esse numero como validado.
-    print(f"\nSanidade (NAO validado, ver README): AA bet={aa_bet:.2f} KK bet={kk_bet:.2f}")
+    # -> 62% em 100k, ainda subindo). RESOLVIDO (2026-08): rodando
+    # compute_exploitability() (best-response exato, agora generalizado
+    # pra board incompleto) nesse mesmo spot com 5k/20k/50k iteracoes,
+    # a exploitability cai monotonicamente (85% do pote -> 34% -> 14%),
+    # com o numero de infosets praticamente estavel entre 20k e 50k --
+    # confirma que e' convergencia genuinamente lenta (nao bug). Ainda
+    # assim, 14% de exploitability em 50k e' alto demais pra tratar
+    # esse numero como validado -- precisaria de MUITO mais iteracoes.
+    # Ver README.
+    print(f"\nSanidade (convergencia lenta confirmada via exploitability, ver README): AA bet={aa_bet:.2f} KK bet={kk_bet:.2f}")
