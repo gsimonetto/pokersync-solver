@@ -465,21 +465,28 @@ class PostflopSolver:
                 out["ip"][c] = {"check": s[0], **{f"bet_{self.bet_sizes[i]}": s[1 + i] for i in range(len(self.bet_sizes))}}
         return out
 
-    def _showdown_util(self, ca, cb, committed_oop, committed_ip):
-        """Mesma formula usada durante o treino (_end_of_action, board
-        completo) -- reaproveitada aqui pra evitar duplicar a aritmetica
-        de pote/showdown num segundo lugar."""
-        result = class_pair_win_prob(ca, cb, self.board0, self._showdown_cache)
+    def _showdown_result(self, ca, cb, board):
+        """Despacha pra equity exata: board completo -> class_pair_win_prob
+        (5 cartas fixas); board incompleto -> runout_equity (media exata
+        sobre TODAS as cartas que faltam, sem amostragem). Ambas devolvem
+        P(ca vence) na mesma convencao (None se par de classes bloqueado)."""
+        if len(board) == 5:
+            return class_pair_win_prob(ca, cb, board, self._showdown_cache)
+        return runout_equity(ca, cb, board, self._runout_cache, self._showdown_cache)
+
+    def _showdown_util_board(self, ca, cb, committed_oop, committed_ip, board):
+        """Generalizacao de _showdown_util pra qualquer board (completo ou
+        nao) -- mesma formula de pote usada em _end_of_action."""
+        result = self._showdown_result(ca, cb, board)
         pot_total = self.pot0 + committed_oop + committed_ip
         if result is None:
             return 0.0, 0.0
         return pot_total * result - committed_oop, pot_total * (1 - result) - committed_ip
 
     def compute_exploitability(self):
-        """Best-response exato (sem amostragem) -- só implementado pro
-        RIVER (board completo, sem nó de chance) por enquanto; turn/flop
-        exigiriam enumerar exatamente os nós de chance, o que fica pra
-        depois. Retorna (br_oop, br_ip, exploitability):
+        """Best-response exato (sem amostragem), agora generalizado pra
+        qualquer board (river/turn/flop). Retorna (br_oop, br_ip,
+        exploitability):
           - br_oop/br_ip: valor que cada jogador consegue ganhar jogando
             a MELHOR resposta possível contra a estratégia média (já
             treinada) fixa do oponente.
@@ -490,184 +497,243 @@ class PostflopSolver:
             como em kuhn_poker.py/rfi_jam.py) -- é so subtrair a
             constante pra recuperar a mesma leitura de sempre:
             exploitability -> 0 significa equilíbrio de Nash."""
-        if len(self.board0) != 5:
-            raise NotImplementedError(
-                "exploitability exata só implementada pro river (board de 5 cartas, sem nó de chance) por enquanto"
-            )
         br_oop = self._best_response("oop")
         br_ip = self._best_response("ip")
         return br_oop, br_ip, (br_oop + br_ip - self.pot0)
 
-    def _best_response(self, br):
-        """Fixa a estratégia média do OPONENTE (já treinada) e calcula o
-        valor da melhor resposta possível de `br` contra ela, respeitando
-        infosets (mesma ação por classe -- não pode "ver" a classe exata
-        do oponente e escolher ação diferente pra cada uma).
+    def _br_showdown_value(self, br, own_class, opp_class, committed_oop, committed_ip, board):
+        """Valor de showdown pra `br` (own_class fixa, opp_class fixa),
+        na convencao oop/ip usada em todo o motor."""
+        if br == "oop":
+            ca, cb = own_class, opp_class
+        else:
+            ca, cb = opp_class, own_class
+        u_oop, u_ip = self._showdown_util_board(ca, cb, committed_oop, committed_ip, board)
+        return u_oop if br == "oop" else u_ip
 
-        Ordem de resolução (mesmo cuidado de kuhn_poker.py/rfi_jam.py):
-        primeiro as decisões MAIS PROFUNDAS de `br` -- facing_raise (br
-        apostou no seu nó de "primeiro a agir": raiz se br=oop, ou
-        facing_check se br=ip; oponente deu raise; br decide fold/call)
-        e facing_bet (oponente apostou no nó dele de "primeiro a agir";
-        br decide fold/call/raise) -- nenhuma delas depende da outra,
-        só da estratégia fixa do oponente. Só DEPOIS disso dá pra
-        calcular a decisão mais rasa (bet_or_check), que pode recair em
-        qualquer uma das duas."""
-        opp = "ip" if br == "oop" else "oop"
+    def _br_end_of_action(self, br, own_class, committed_oop, committed_ip, opp_reach, board, prefix):
+        """Espelha _end_of_action, mas devolve a soma PONDERADA (por
+        opp_reach, nao normalizada) do valor pra `br`, e usa enumeracao
+        EXATA (nao amostragem) no no de chance -- e' so' aqui que a
+        diferenca entre treino (MCCFR, 1 carta por iteracao) e
+        best-response (exato, todas as cartas) realmente importa."""
+        remaining_oop = self.stack_oop - committed_oop
+        remaining_ip = self.stack_ip - committed_ip
+        if len(board) == 5 or remaining_oop <= 1e-9 or remaining_ip <= 1e-9:
+            return sum(
+                w * self._br_showdown_value(br, own_class, opp_class, committed_oop, committed_ip, board)
+                for opp_class, w in opp_reach.items()
+                if w != 0
+            )
+        deck = [r + s for r in RANKS for s in SUITS if (r + s) not in set(board)]
+        total = 0.0
+        for card in deck:
+            new_board = board + (card,)
+            total += self._br_bet_or_check(
+                br, "oop", own_class, committed_oop, committed_ip, opp_reach,
+                new_board, prefix + f"|deal{card}", is_second=False,
+            )
+        return total / len(deck)
+
+    def _br_facing_raise(self, br, bettor, own_class, bet_amt, raise_to,
+                          committed_oop, committed_ip, opp_reach, board, prefix):
+        """Espelha _node_facing_raise. `bettor` decide fold/call contra o
+        raise -- se bettor==br, e' decisao de `br` (pega o maximo); senao
+        e' o oponente (le a estrategia media treinada, por classe)."""
+        u_fold_pair = self._terminal_fold(bettor, bet_amt, bet_amt, self.pot0)
+        u_fold_for_br = u_fold_pair[0] if br == "oop" else u_fold_pair[1]
+
+        if bettor == br:
+            own_stack = self.stack_oop if br == "oop" else self.stack_ip
+            matched = min(own_stack, raise_to)
+            total_reach = sum(opp_reach.values())
+            u_call = self._br_end_of_action(br, own_class, matched, matched, opp_reach, board, prefix + "|allin")
+            return max(u_fold_for_br * total_reach, u_call)
+
+        opp_stack = self.stack_oop if bettor == "oop" else self.stack_ip
+        matched = min(opp_stack, raise_to)
+        fold_reach_total = 0.0
+        call_reach = {}
+        for c, w in opp_reach.items():
+            if w == 0:
+                continue
+            key = f"{prefix}|facing_raise|{bettor}|{c}"
+            if key not in self.trainer.infosets:
+                continue  # infoset nunca visitado no treino -- exclui (nao "chuta" fold nem call)
+            strat = self.trainer.infosets[key].get_average_strategy()
+            fold_reach_total += w * strat[0]
+            if strat[1] > 0:
+                call_reach[c] = w * strat[1]
+        total = fold_reach_total * u_fold_for_br
+        if call_reach:
+            total += self._br_end_of_action(br, own_class, matched, matched, call_reach, board, prefix + "|allin")
+        return total
+
+    def _br_facing_bet(self, br, bettor, own_class, bet_amt, committed_oop, committed_ip,
+                        opp_reach, board, prefix):
+        """Espelha _node_facing_bet. `responder` (o outro jogador em
+        relacao a `bettor`) decide fold/call/raise -- mesma logica de
+        despacho br-decide vs oponente-decide de _br_facing_raise."""
+        responder = "ip" if bettor == "oop" else "oop"
+        new_committed_oop = committed_oop + (bet_amt if bettor == "oop" else 0)
+        new_committed_ip = committed_ip + (bet_amt if bettor == "ip" else 0)
+        u_fold_pair = self._terminal_fold(responder, new_committed_oop, new_committed_ip, self.pot0)
+        u_fold_for_br = u_fold_pair[0] if br == "oop" else u_fold_pair[1]
+
+        call_committed_oop = new_committed_oop + (bet_amt if responder == "oop" else 0)
+        call_committed_ip = new_committed_ip + (bet_amt if responder == "ip" else 0)
+
+        if responder == br:
+            own_stack = self.stack_oop if br == "oop" else self.stack_ip
+            own_committed = committed_oop if br == "oop" else committed_ip
+            raise_legal = (own_stack - own_committed - bet_amt) > 1e-9
+            total_reach = sum(opp_reach.values())
+            u_call = self._br_end_of_action(
+                br, own_class, call_committed_oop, call_committed_ip, opp_reach, board, prefix + "|call",
+            )
+            best = max(u_fold_for_br * total_reach, u_call)
+            if raise_legal:
+                raise_to = own_stack
+                u_raise = self._br_facing_raise(
+                    br, bettor, own_class, bet_amt, raise_to,
+                    new_committed_oop, new_committed_ip, opp_reach, board, prefix,
+                )
+                best = max(best, u_raise)
+            return best
+
+        opp = responder
+        opp_stack = self.stack_oop if opp == "oop" else self.stack_ip
+        opp_committed = committed_oop if opp == "oop" else committed_ip
+        raise_legal = (opp_stack - opp_committed - bet_amt) > 1e-9
+        fold_reach_total = 0.0
+        call_reach = {}
+        raise_reach = {}
+        for c, w in opp_reach.items():
+            if w == 0:
+                continue
+            key = f"{prefix}|facing_bet|{opp}|{c}"
+            if key not in self.trainer.infosets:
+                continue
+            strat = self.trainer.infosets[key].get_average_strategy()
+            fold_reach_total += w * strat[0]
+            if strat[1] > 0:
+                call_reach[c] = w * strat[1]
+            if raise_legal and len(strat) > 2 and strat[2] > 0:
+                raise_reach[c] = w * strat[2]
+        total = fold_reach_total * u_fold_for_br
+        if call_reach:
+            total += self._br_end_of_action(
+                br, own_class, call_committed_oop, call_committed_ip, call_reach, board, prefix + "|call",
+            )
+        if raise_reach:
+            raise_to = opp_stack
+            total += self._br_facing_raise(
+                br, bettor, own_class, bet_amt, raise_to,
+                new_committed_oop, new_committed_ip, raise_reach, board, prefix,
+            )
+        return total
+
+    def _br_bet_or_check(self, br, actor, own_class, committed_oop, committed_ip,
+                          opp_reach, board, prefix, is_second):
+        """Espelha _node_bet_or_check. `actor` decide check ou bet(tamanho)
+        -- br-decide (maximo) vs oponente-decide (le estrategia media,
+        divide opp_reach por acao)."""
+        if actor == br:
+            if is_second:
+                u_check = self._br_end_of_action(br, own_class, committed_oop, committed_ip, opp_reach, board, prefix + "|xx")
+            else:
+                other = "ip" if actor == "oop" else "oop"
+                u_check = self._br_bet_or_check(
+                    br, other, own_class, committed_oop, committed_ip, opp_reach, board, prefix + "-x", is_second=True,
+                )
+            best = u_check
+            own_stack = self.stack_oop if actor == "oop" else self.stack_ip
+            own_committed = committed_oop if actor == "oop" else committed_ip
+            current_pot = self.pot0 + committed_oop + committed_ip
+            remaining = own_stack - own_committed
+            for idx, size in enumerate(self.bet_sizes):
+                bet_amt = min(size * current_pot, remaining)
+                if bet_amt <= 1e-9:
+                    continue
+                u_bet = self._br_facing_bet(
+                    br, actor, own_class, bet_amt, committed_oop, committed_ip, opp_reach, board, prefix + f"-b{idx}",
+                )
+                if u_bet > best:
+                    best = u_bet
+            return best
+
+        opp = actor
+        check_reach = {}
+        bet_reach = [dict() for _ in self.bet_sizes]
+        for c, w in opp_reach.items():
+            if w == 0:
+                continue
+            key = f"{prefix}|bet_or_check|{opp}|{c}"
+            if key not in self.trainer.infosets:
+                continue
+            strat = self.trainer.infosets[key].get_average_strategy()
+            if strat[0] > 0:
+                check_reach[c] = w * strat[0]
+            for idx in range(len(self.bet_sizes)):
+                if strat[1 + idx] > 0:
+                    bet_reach[idx][c] = w * strat[1 + idx]
+
+        total = 0.0
+        if check_reach:
+            if is_second:
+                total += self._br_end_of_action(br, own_class, committed_oop, committed_ip, check_reach, board, prefix + "|xx")
+            else:
+                other = "ip" if opp == "oop" else "oop"
+                total += self._br_bet_or_check(
+                    br, other, own_class, committed_oop, committed_ip, check_reach, board, prefix + "-x", is_second=True,
+                )
+
+        own_stack = self.stack_oop if opp == "oop" else self.stack_ip
+        own_committed = committed_oop if opp == "oop" else committed_ip
+        current_pot = self.pot0 + committed_oop + committed_ip
+        remaining = own_stack - own_committed
+        for idx, size in enumerate(self.bet_sizes):
+            if not bet_reach[idx]:
+                continue
+            bet_amt = min(size * current_pot, remaining)
+            if bet_amt <= 1e-9:
+                continue
+            total += self._br_facing_bet(
+                br, opp, own_class, bet_amt, committed_oop, committed_ip, bet_reach[idx], board, prefix + f"-b{idx}",
+            )
+        return total
+
+    def _best_response(self, br):
+        """Fixa a estrategia media do OPONENTE (ja treinada) e calcula o
+        valor da melhor resposta possivel de `br` contra ela, respeitando
+        infosets (mesma acao por classe -- nao pode "ver" a classe exata
+        do oponente e escolher acao diferente pra cada uma).
+
+        Reescrita (2026-08) como recursao completa que espelha a arvore
+        de treino (_node_bet_or_check/_node_facing_bet/_node_facing_raise/
+        _end_of_action), em vez da versao anterior que so' cobria river
+        (3 niveis fixos, sem no de chance). `opp_reach` carrega o peso
+        (nao normalizado) de cada classe do oponente dado o caminho
+        percorrido ate' aqui -- cada funcao devolve a soma ponderada do
+        valor pra `br` (nao o valor medio), entao o total no topo ja' sai
+        certo sem precisar renormalizar (w_opp soma 1 no inicio).
+
+        Infoset nunca visitado no treino (comum no flop, onde a amostra
+        de 1 carta/iteracao so' cobre uma fracao das ~2000 combinacoes
+        possiveis de turn+river): a classe correspondente e' EXCLUIDA do
+        calculo (peso zero) em vez de assumir um comportamento padrao
+        (tipo "sempre folda") -- evita viesar o resultado numa direcao
+        sem justificativa. Ver README sobre essa decisao."""
         br_classes = self.classes_oop if br == "oop" else self.classes_ip
         opp_classes = self.classes_ip if br == "oop" else self.classes_oop
         w_br = self.w_oop if br == "oop" else self.w_ip
         w_opp = self.w_ip if br == "oop" else self.w_oop
-        br_stack = self.stack_oop if br == "oop" else self.stack_ip
-        opp_stack = self.stack_ip if br == "oop" else self.stack_oop
 
-        def showdown_util_br(a_br, a_opp, committed_br, committed_opp):
-            if br == "oop":
-                return self._showdown_util(a_br, a_opp, committed_br, committed_opp)[0]
-            return self._showdown_util(a_opp, a_br, committed_opp, committed_br)[1]
-
-        def fold_util_br(folder, committed_br, committed_opp):
-            """folder: 'br' ou 'opp' (quem esta foldando). Retorna o
-            valor resultante pra `br`."""
-            key = "oop" if ((folder == "br" and br == "oop") or (folder == "opp" and opp == "oop")) else "ip"
-            committed_oop = committed_br if br == "oop" else committed_opp
-            committed_ip = committed_opp if br == "oop" else committed_br
-            pair = self._terminal_fold(key, committed_oop, committed_ip, self.pot0)
-            return pair[0] if br == "oop" else pair[1]
-
-        raise_after_check = br == "ip"   # br aposta no facing_check (so ip tem esse no); oop aposta na raiz
-        bet_after_check = br == "oop"    # br responde a bet -- oop so enfrenta bet depois de checkar
-
-        # ---- nivel 1a: facing_raise de br (br apostou, oponente deu raise) ----
-        fr_value = {}
-        fr_action = {}
-        for b, size in enumerate(self.bet_sizes):
-            bet_amt = min(size * self.pot0, br_stack)
-            raise_prob = {}
-            any_raise = False
-            for c in opp_classes:
-                s = self.facing_bet_strategy(br, b, c, after_check=raise_after_check)
-                if s is not None and len(s) > 2:
-                    raise_prob[c] = s[2]
-                    any_raise = True
-                else:
-                    raise_prob[c] = 0.0
-            total_reach = sum(w_opp[c] * raise_prob[c] for c in opp_classes)
-            for ca in br_classes:
-                if not any_raise or total_reach <= 0:
-                    fr_value[(b, ca)] = None
-                    fr_action[(b, ca)] = None
-                    continue
-                matched = min(br_stack, opp_stack)
-                ev_fold = fold_util_br("br", bet_amt, bet_amt)
-                ev_call_num = sum(
-                    w_opp[c] * raise_prob[c] * showdown_util_br(ca, c, matched, matched)
-                    for c in opp_classes if raise_prob[c] > 0
-                )
-                ev_call = ev_call_num / total_reach
-                if ev_call > ev_fold:
-                    fr_action[(b, ca)] = "call"
-                    fr_value[(b, ca)] = ev_call
-                else:
-                    fr_action[(b, ca)] = "fold"
-                    fr_value[(b, ca)] = ev_fold
-
-        # ---- nivel 1b: facing_bet de br (oponente apostou, br responde) ----
-        fb_value = {}
-        fb_action = {}
-        for b, size in enumerate(self.bet_sizes):
-            bet_amt = min(size * self.pot0, opp_stack)
-            bet_prob = {}
-            for c in opp_classes:
-                s = self.strategy(opp, "facing_check" if bet_after_check else "root", c)
-                bet_prob[c] = s[1 + b] if s else 0.0
-            total_reach = sum(w_opp[c] * bet_prob[c] for c in opp_classes)
-            raise_legal = (br_stack - bet_amt) > 1e-9
-            for ca in br_classes:
-                if total_reach <= 0:
-                    fb_value[(b, ca)] = None
-                    fb_action[(b, ca)] = None
-                    continue
-                # br ainda nao comprometeu nada nessa rodada -- quem apostou foi o oponente
-                ev_fold = fold_util_br("br", 0.0, bet_amt)
-                ev_call_num = sum(
-                    w_opp[c] * bet_prob[c] * showdown_util_br(ca, c, bet_amt, bet_amt)
-                    for c in opp_classes if bet_prob[c] > 0
-                )
-                ev_call = ev_call_num / total_reach
-                best_val, best_act = (ev_fold, "fold") if ev_fold >= ev_call else (ev_call, "call")
-                if raise_legal:
-                    matched = min(br_stack, opp_stack)
-                    opp_fold_prob, opp_call_prob = {}, {}
-                    for c in opp_classes:
-                        s = self.facing_raise_strategy(opp, b, c, after_check=bet_after_check)
-                        opp_fold_prob[c] = s[0] if s else 1.0
-                        opp_call_prob[c] = s[1] if s else 0.0
-                    ev_raise_num = 0.0
-                    for c in opp_classes:
-                        w = w_opp[c] * bet_prob[c]
-                        if w <= 0:
-                            continue
-                        # oponente folda pro raise de br: contabilidade usa o bet_amt
-                        # ORIGINAL (nao o valor do raise) -- o excedente nao pago do
-                        # raise volta pra br, mesma regra usada no treino
-                        # (_node_facing_raise -- ver docstring do modulo)
-                        v_fold_br = fold_util_br("opp", bet_amt, bet_amt)
-                        v_call_br = showdown_util_br(ca, c, matched, matched)
-                        ev_raise_num += w * (opp_fold_prob[c] * v_fold_br + opp_call_prob[c] * v_call_br)
-                    ev_raise = ev_raise_num / total_reach
-                    if ev_raise > best_val:
-                        best_val, best_act = ev_raise, "raise"
-                fb_value[(b, ca)] = best_val
-                fb_action[(b, ca)] = best_act
-
-        # ---- nivel 2: bet_or_check de br (raiz se br=oop, facing_check se br=ip) ----
         total = 0.0
         for ca in br_classes:
-            ev_check = 0.0
-            for c in opp_classes:
-                s = self.strategy(opp, "facing_check" if br == "oop" else "root", c)
-                if s is None:
-                    continue
-                w = w_opp[c]
-                check_prob = s[0]
-                ev_check += w * check_prob * showdown_util_br(ca, c, 0.0, 0.0)
-                for b in range(len(self.bet_sizes)):
-                    bp = s[1 + b]
-                    if bp <= 0:
-                        continue
-                    val = fb_value.get((b, ca))
-                    if val is not None:
-                        ev_check += w * bp * val
-            best_val = ev_check
-            for b, size in enumerate(self.bet_sizes):
-                bet_amt = min(size * self.pot0, br_stack)
-                fold_prob, call_prob, raise_prob = {}, {}, {}
-                for c in opp_classes:
-                    s = self.facing_bet_strategy(br, b, c, after_check=raise_after_check)
-                    if s is None:
-                        fold_prob[c], call_prob[c], raise_prob[c] = 1.0, 0.0, 0.0
-                    else:
-                        fold_prob[c] = s[0]
-                        call_prob[c] = s[1]
-                        raise_prob[c] = s[2] if len(s) > 2 else 0.0
-                ev_bet = 0.0
-                # br apostou (comprometeu bet_amt); se o oponente folda, br
-                # so tem seu proprio bet_amt em jogo (nao comprometeu nada extra)
-                v_fold_br = fold_util_br("opp", bet_amt, 0.0)
-                for c in opp_classes:
-                    w = w_opp[c]
-                    v_call = showdown_util_br(ca, c, bet_amt, bet_amt)
-                    v_raise = fr_value.get((b, ca))
-                    contrib = fold_prob[c] * v_fold_br + call_prob[c] * v_call
-                    if raise_prob[c] > 0 and v_raise is not None:
-                        contrib += raise_prob[c] * v_raise
-                    elif raise_prob[c] > 0:
-                        contrib += raise_prob[c] * v_call  # fallback (nao deveria ocorrer)
-                    ev_bet += w * contrib
-                if ev_bet > best_val:
-                    best_val = ev_bet
-            total += w_br[ca] * best_val
+            opp_reach = {c: w_opp[c] for c in opp_classes}
+            val = self._br_bet_or_check(br, "oop", ca, 0.0, 0.0, opp_reach, self.board0, "", is_second=False)
+            total += w_br[ca] * val
         return total
 
 
