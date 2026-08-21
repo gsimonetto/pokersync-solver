@@ -10,6 +10,10 @@ estado real do banco de produção (Supabase `PokerSync`,
 | `gsimonetto/pokersync-solver` | motor CFR próprio (este repo) | 4.6k linhas, núcleo validado |
 | `gsimonetto/pokersync-road-map` | roadmap editável (Lovable/TanStack) | seed inicial, desatualizado |
 
+> O documento mestre do projeto (visão, decisões, estado dos módulos e
+> backlog vivo) fica em `POKERSYNC.md`, no repositório do produto. Este
+> arquivo cobre só a fronteira entre motor e produto.
+
 ## Resumo em uma frase
 
 **O motor já resolve mais do que o produto consome, e o produto já tem
