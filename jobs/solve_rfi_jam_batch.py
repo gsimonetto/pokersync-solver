@@ -25,6 +25,7 @@ from engine.rfi_jam import RfiJamSolver  # noqa: E402
 from jobs.supabase_client import get_client  # noqa: E402
 
 ENGINE_VERSION = "pokersync-solver-v0.3.0-rfi-jam-validated"
+ENGINE_VERSION_MULTISIZE = "pokersync-solver-v0.4.0-rfi-jam-multisize"
 
 # posts/dead_money por matchup -- só adicionar um matchup novo aqui
 # depois de validar exploitability com compute_exploitability()
@@ -83,16 +84,97 @@ def build_drill_row(spot_id: str, matchup: str, solver: RfiJamSolver, strat: dic
     }
 
 
+def _compact_phase_by_size(phase_hands_by_size: dict, action_name: str, ev_fold_by_size: dict) -> dict:
+    return {
+        "by_size": {
+            str(size): {
+                "ev_fold": round(ev_fold_by_size[size], 3),
+                "action": action_name,
+                "hands": {
+                    c: [round(freq, 4), round(ev, 3), round(gap, 3)]
+                    for c, (freq, ev, gap) in hands.items()
+                },
+            }
+            for size, hands in phase_hands_by_size.items()
+        }
+    }
+
+
+def build_drill_row_multisize(spot_id: str, matchup: str, solver: RfiJamSolver, strat: dict,
+                               evs: dict, exploitability: float, job_id: str | None, stack_bb: float):
+    """
+    Mesma ideia de build_drill_row(), mas com uma dimensao de tamanho a
+    mais -- cada fase vira {"by_size": {"2.0": {ev_fold, action, hands},
+    "2.5": {...}, ...}} em vez de um objeto unico. `sizes` no topo do
+    gto_nodes eh o jeito do frontend detectar "isso eh multi-tamanho"
+    sem precisar inspecionar a forma de cada fase.
+    """
+    pot = solver.opener_post + solver.defender_post
+    sizes = solver.sizes
+    first_class = solver.classes[0]
+
+    def hands_for_size(prob_key: str, ev_key: str, size: float) -> dict:
+        if prob_key == "sb_open":
+            return {c: (strat["sb_open"][c][size], evs["sb_open"][c][size][ev_key], evs["sb_open"][c][size]["gap"]) for c in solver.classes}
+        return {c: (strat[prob_key][size][c], evs[prob_key][size][c][ev_key], evs[prob_key][size][c]["gap"]) for c in solver.classes}
+
+    def ev_fold_for_size(prob_key: str, size: float) -> float:
+        if prob_key == "sb_open":
+            return evs["sb_open"][first_class][size]["fold"]
+        return evs[prob_key][size][first_class]["fold"]
+
+    def phase(prob_key: str, ev_key: str, action_name: str) -> dict:
+        return _compact_phase_by_size(
+            {size: hands_for_size(prob_key, ev_key, size) for size in sizes},
+            action_name,
+            {size: ev_fold_for_size(prob_key, size) for size in sizes},
+        )
+
+    gto_nodes = {
+        "sizes": sizes,
+        "sb_open": phase("sb_open", "open", "open"),
+        "bb_jam": phase("bb_jam", "jam", "allin"),
+        "sb_call_jam": phase("sb_call_jam", "call", "call"),
+    }
+
+    return {
+        "spot_id": spot_id,
+        "board": [],
+        "pot": pot,
+        "effective_stack": solver.T,
+        "gto_nodes": gto_nodes,
+        "solution": None,
+        "format": None,
+        "stack_bb": int(stack_bb),
+        "position": matchup,
+        "street": "Preflop",
+        "action": "rfi_jam",
+        "engine_version": ENGINE_VERSION_MULTISIZE,
+        "exploitability": round(exploitability, 3),
+        "solver_job_id": job_id,
+        "generated_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+    }
+
+
 def run_rfi_jam_batch(job_id: str | None, matchups: list[str], stacks_bb: list[float],
                        other_stacks: list[float], payouts: list[float], equity_matrix, classes,
-                       open_size=2.2, iterations=2_500_000, dry_run=False):
+                       open_size=2.2, open_sizes: list[float] | None = None,
+                       iterations=2_500_000, dry_run=False):
     """
     Roda o batch completo (matchups x stacks) e sobe pro Supabase --
     a menos que dry_run=True, aí só retorna as rows sem inserir (útil
     pra conferir antes de gravar).
+
+    `open_sizes` (lista, ex [2.0, 2.5, 3.0]) gera spots multi-tamanho
+    -- formato NOVO em gto_nodes (ver build_drill_row_multisize), grava
+    numa linha SEPARADA (spot_id com sufixo "_msize") pra não colidir
+    nem substituir os spots de 1 tamanho já validados/em produção.
+    Sem `open_sizes`, comportamento idêntico a antes (`open_size`
+    escalar, formato antigo) -- nenhuma mudança pro que já existe.
     """
     client = None if dry_run else get_client()
     results = []
+    multisize = bool(open_sizes and len(open_sizes) > 1)
 
     for matchup in matchups:
         if matchup not in MATCHUPS:
@@ -103,7 +185,8 @@ def run_rfi_jam_batch(job_id: str | None, matchups: list[str], stacks_bb: list[f
             table_stacks = [stack, stack] + other_stacks
             solver = RfiJamSolver(
                 sb_idx=0, bb_idx=1, table_stacks=table_stacks, payouts=payouts,
-                equity_matrix=equity_matrix, classes=classes, open_size=open_size,
+                equity_matrix=equity_matrix, classes=classes,
+                open_size=open_size, open_sizes=open_sizes,
                 effective_stack=stack, opener_post=opener_post, defender_post=defender_post,
                 dead_money=dead_money,
             )
@@ -112,8 +195,12 @@ def run_rfi_jam_batch(job_id: str | None, matchups: list[str], stacks_bb: list[f
             evs = solver.compute_action_evs(strat)
             br_sb, br_bb = solver.compute_exploitability(strat)
 
-            spot_id = f"rfi_jam_{matchup}_{int(stack)}bb"
-            row = build_drill_row(spot_id, matchup, solver, strat, evs, br_sb + br_bb, job_id, stack)
+            if multisize:
+                spot_id = f"rfi_jam_{matchup}_{int(stack)}bb_msize"
+                row = build_drill_row_multisize(spot_id, matchup, solver, strat, evs, br_sb + br_bb, job_id, stack)
+            else:
+                spot_id = f"rfi_jam_{matchup}_{int(stack)}bb"
+                row = build_drill_row(spot_id, matchup, solver, strat, evs, br_sb + br_bb, job_id, stack)
             results.append(row)
 
             if client and job_id:

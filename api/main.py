@@ -92,6 +92,12 @@ class RfiJamJobRequest(BaseModel):
     other_stacks: list[float]
     payouts: list[float]
     open_size: float = 2.2
+    # Lista de tamanhos (ex [2.0, 2.5, 3.0]) -- quando informada com 2+
+    # itens, gera o spot no formato multi-tamanho (grava numa linha
+    # separada, sufixo "_msize" no spot_id, não mexe no spot de 1
+    # tamanho já em produção pro mesmo matchup/stack). Omitir mantém o
+    # comportamento de sempre (open_size escalar).
+    open_sizes: list[float] | None = None
     iterations: int = 2_500_000
 
 
@@ -122,6 +128,7 @@ def create_rfi_jam_job(req: RfiJamJobRequest, background_tasks: BackgroundTasks,
                 equity_matrix=equity_matrix,
                 classes=classes,
                 open_size=req.open_size,
+                open_sizes=req.open_sizes,
                 iterations=req.iterations,
             )
             client.table("solver_jobs").update({
