@@ -20,6 +20,21 @@ npm run build    # gera dist/
 npm run preview
 ```
 
+## HTML único (sem build)
+
+`pokersync-landing.html` na raiz de `landing/` é a página inteira em um
+arquivo só — CSS e JS inline, nenhum servidor necessário. Basta abrir no
+navegador ou subir num bucket/CDN.
+
+```bash
+npm run build:html   # regenera pokersync-landing.html a partir do src/
+```
+
+O bundle sai em formato IIFE (script clássico, não módulo) justamente
+para funcionar em `file://`, onde módulos ES são bloqueados por CORS.
+A única dependência externa é a fonte Inter via Google Fonts — sem rede,
+cai no stack de sistema sem quebrar o layout.
+
 ## Narrativa comercial
 
 A página é construída em cima de um único argumento: **a roda da
