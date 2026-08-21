@@ -94,8 +94,9 @@ await fetch(`${SOLVER_API_URL}/jobs/pushfold`, {
 - ✅ Shove/fold heads-up com ICM — funcionando ponta a ponta.
 - ✅ RFI/jam heads-up com ICM — **SB vs BB e BTN vs BB validados**
   (exploitability rigorosa, best-response exato — ver
-  `engine/rfi_jam.py::compute_exploitability`), 3 stacks (15/25/40bb)
-  já em produção no Supabase, 60bb pendente de upload.
+  `engine/rfi_jam.py::compute_exploitability`), 4 stacks (15/25/40/60bb)
+  já em produção no Supabase. Action da fase `bb_jam` gravado como
+  `"allin"` (renomeado de `"jam"` — mesmo significado, nome mais direto).
 - ⏳ CO vs BTN e UTG vs BB — bloqueados como matchup heads-up (2
   jogadores) — a aproximação de "dead money" só é precisa com no
   máximo 1 jogador pulado (BTN vs BB). **Resolvido via motor
