@@ -97,6 +97,24 @@ await fetch(`${SOLVER_API_URL}/jobs/pushfold`, {
   `engine/rfi_jam.py::compute_exploitability`), 4 stacks (15/25/40/60bb)
   já em produção no Supabase. Action da fase `bb_jam` gravado como
   `"allin"` (renomeado de `"jam"` — mesmo significado, nome mais direto).
+- ✅ **Múltiplos tamanhos de abertura** (`RfiJamSolver(open_sizes=[2.0,
+  2.5, 3.0])`, em vez de `open_size` escalar) — o SB ganha um nó de
+  decisão com 1+N ações (fold + uma por tamanho) em vez de só
+  fold-ou-abrir; BB responde a CADA tamanho com sua própria subárvore
+  fold-ou-jam. Continua sendo o único ponto da árvore onde uma escolha
+  de tamanho existe (jam e call-jam continuam all-in por definição, um
+  tamanho só). **Não é** o 3-bet "de verdade" do item abaixo — ainda é
+  a mesma simplificação de "toda resposta a um raise vira all-in", só
+  que agora com várias opções de tamanho pra ABRIR antes disso.
+  Validado: com uma lista de 1 tamanho, reproduz bit-a-bit o motor
+  anterior (`tests/rfi_jam_multisize.py`, teste de regressão); com
+  múltiplos tamanhos, convergência (exploitability + monotonicidade
+  por força de mão) fica no mesmo patamar do motor de 1 tamanho na
+  mesma verba de iterações. `jobs/solve_rfi_jam_batch.py` e os spots já
+  em produção continuam usando `open_size` escalar (nenhuma mudança de
+  comportamento) — ainda não geramos nem subimos nenhum spot multi-
+  tamanho pro Supabase; falta decidir os tamanhos (ex 2x/2.5x/3x) e
+  atualizar o job + o schema de `gto_nodes` + o frontend pra consumir.
 - ⏳ CO vs BTN e UTG vs BB — bloqueados como matchup heads-up (2
   jogadores) — a aproximação de "dead money" só é precisa com no
   máximo 1 jogador pulado (BTN vs BB). **Resolvido via motor
