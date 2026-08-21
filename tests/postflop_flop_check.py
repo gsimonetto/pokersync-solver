@@ -12,6 +12,13 @@ de o bluff-catcher completar quads (~0.1%) ou o blefe completar dois
 pares/trinca (~poucos %) no turn+river. Por isso a tolerância aqui é
 maior que no river/turn.
 
+Iterações (2026-08): 1500 nunca converge nesse spot (faltam 2 cartas
+-> ~2300 continuações por par de classes, precisa de muita visita pra
+cada uma). Antes do fix de performance em cfr_core.py (discount()
+deixou de varrer todo infoset a cada iteração), 50k iterações levava
+tempo inviável pra rodar aqui; agora leva ~2min20s e converge (QQ
+call=0.582 vs MDF teórico 0.571, diff=0.011). Ver README.
+
 Rodar: python3 tests/postflop_flop_check.py
 """
 
@@ -37,7 +44,7 @@ if __name__ == "__main__":
         board=BOARD, range_oop=RANGE_OOP, range_ip=RANGE_IP,
         pot=POT, stack_oop=60.0, stack_ip=60.0, bet_sizes=(BET_FRAC,),
     )
-    solver.train(iterations=1500)
+    solver.train(iterations=50000)
     elapsed = time.time() - t0
 
     strat = solver.average_strategy_root()
@@ -58,4 +65,11 @@ if __name__ == "__main__":
 
     aa_bet = 1 - strat["oop"]["AA"]["check"]
     kk_bet = 1 - strat["oop"]["KK"]["check"]
-    print(f"\nSanidade: AA bet={aa_bet:.2f} KK bet={kk_bet:.2f} (esperado: quase sempre)")
+    # NAO estabiliza nem com 150k iteracoes (medido 2026-08: 19% em 5k
+    # -> 62% em 100k, ainda subindo) -- regret_sum de check/bet fica
+    # sempre positivo e da mesma ordem nos dois, sugerindo quase-
+    # indiferenca nesse spot (IP so' tem 1 classe de mao, nao um range
+    # real) mais do que erro de calculo, mas isso NAO esta confirmado
+    # (falta exploitability rigorosa pra board incompleto). Ver README.
+    # Nao tratar esse numero como validado.
+    print(f"\nSanidade (NAO validado, ver README): AA bet={aa_bet:.2f} KK bet={kk_bet:.2f}")

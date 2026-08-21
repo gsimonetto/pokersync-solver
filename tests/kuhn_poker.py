@@ -14,12 +14,17 @@ obrigatória (ante) de 1. P1 age primeiro: check ou bet(1).
 - Se check: P2 pode check (showdown) ou bet(1) -> P1 decide fold/call.
 - Se bet: P2 decide fold/call.
 
-Equilíbrio conhecido (um parâmetro alpha em [0, 1/3], família de Nash):
+Equilíbrio conhecido (um parâmetro alpha em [0, 1/3], família de Nash;
+ver Neller & Lanctot, "An Introduction to Counterfactual Regret
+Minimization"):
   P1 com J: aposta com prob. alpha (blefe); se apostado contra, sempre fold.
-  P1 com Q: nunca aposta primeiro; se apostado contra, paga com prob. 1/3.
+  P1 com Q: nunca aposta primeiro; se apostado contra, paga com prob.
+    alpha + 1/3 (depende de alpha, não é 1/3 fixo).
   P1 com K: aposta com prob. 3*alpha; se apostado contra, sempre paga.
-  P2 com J: nunca aposta; se P1 apostou, sempre fold.
-  P2 com Q: se checado, sempre check; se P1 apostou, paga com prob. 1/3.
+  P2 com J: aposta com prob. 1/3 (blefe, fixo); se P1 apostou, sempre
+    fold. (Fix 2026-08: docstring antigo dizia "nunca aposta" -- errado,
+    o motor já convergia certo, só o texto estava trocado.)
+  P2 com Q: se checado, sempre check; se P1 apostou, paga com prob. 1/3 (fixo).
   P2 com K: se checado, sempre aposta; se P1 apostou, sempre paga.
   Valor do jogo (para P1) = -1/18 ≈ -0.0556.
 """
@@ -254,6 +259,7 @@ def train(iterations=20_000, seed=42):
             iter_util += cfr(trainer, list(deal), "", 1.0, 1.0)
         util_sum += iter_util / len(ALL_DEALS)
         trainer.discount(t)
+    trainer.finalize()
     return trainer, util_sum / iterations
 
 
@@ -277,11 +283,11 @@ if __name__ == "__main__":
 
     print("\nP1 apos check-bet de P2 (história='01'):")
     show("J", "01", "com J (esperado ~0.0 de call = sempre fold)")
-    show("Q", "01", "com Q (esperado ~0.33 de call)")
+    show("Q", "01", "com Q (esperado alpha+0.33 de call)")
     show("K", "01", "com K (esperado ~1.0 de call)")
 
     print("\nP2 apos check de P1 (história='0'):")
-    show("J", "0", "com J (esperado ~0.0 de bet)")
+    show("J", "0", "com J (esperado ~0.33 de bet, blefe)")
     show("Q", "0", "com Q (esperado ~0.0 de bet)")
     show("K", "0", "com K (esperado ~1.0 de bet)")
 

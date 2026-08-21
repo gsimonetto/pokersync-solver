@@ -161,22 +161,57 @@ await fetch(`${SOLVER_API_URL}/jobs/pushfold`, {
     tamanho (all-in), mesma simplificação do pré-flop pra 3-bet/4-bet;
     (3) a carta sorteada nos nós de chance ignora blockers com as mãos
     específicas dos jogadores (só evita colidir com o board).
-- ⏳ **Flop** — rodei o mesmo `PostflopSolver` com board de 3 cartas
-  num spot de teste (`tests/postflop_flop_check.py`, exploratório, não
-  é suite de regressão) e **não convergiu** dentro de um tempo curto
-  (1500 iterações, ~2m40s): ficou ~16% longe da fórmula fechada de
-  MDF, contra <3% no turn. Causa provável: faltam 2 cartas (turn+
-  river), o que cria um leque de ~2300 combinações de continuação por
-  par de classes — cada uma precisa de várias visitas pra convergir, e
-  1500 iterações é pouco pra isso. Não achei bug na equity em si (o
-  cálculo exato de "correr o board" foi conferido e bate certo) nem na
-  árvore (o mesmo código, rodado só no turn com bet forçando all-in
-  imediato, também converge certinho). O que falta é rodar por MUITO
-  mais tempo — mesmo padrão já documentado no motor multiway: função
-  offline, no seu computador, por bastante tempo, não em uma sessão
-  curta. Próximo passo: rodar `PostflopSolver` num board de flop com
-  iterações bem mais altas (dezenas de milhares+) e medir de novo
-  antes de confiar no resultado.
+- ⏳/✅ **Flop** — performance corrigida e verificada (2026-08); a
+  validação em si segue parcial (métrica principal ok, uma métrica
+  secundária ainda em aberto). Três achados:
+  1. **Bug de performance corrigido em `engine/cfr_core.py`**
+     (`DiscountedCFRTrainer.discount`): a cada iteração, o código
+     varria TODOS os infosets já criados pra aplicar o desconto —
+     inofensivo quando o conjunto de infosets é estável (river/turn),
+     mas no flop cada iteração sorteia turn+river e pode criar
+     infosets novos, então a varredura ficava maior a cada passada.
+     Medido: 0.017s/iteração com 250 iterações rodadas, 0.183s/iteração
+     com 3000 — quase 11x mais lento só por causa da varredura,
+     crescendo sem parar. Era por isso que rodar a noite inteira (200k
+     iterações) não terminava. Corrigido: desconto agora é aplicado
+     sob demanda (cada infoset recalcula seu próprio desconto
+     acumulado -- via produtos em log, O(1) -- só quando é tocado de
+     novo, ou de uma vez em `trainer.finalize()` no fim do treino),
+     matematicamente idêntico ao método antigo (mesma sequência de
+     multiplicações, só agrupada) -- **verificado**: Kuhn Poker, river,
+     turn e o teste de exploitability do river deram os MESMOS
+     números, até a última casa decimal, antes e depois da mudança.
+     `postflop_flop_check.py` (1500 iterações) ficou ~17x mais rápido
+     (106s -> 6.1s); turn ficou ~2x mais rápido de brinde.
+  2. **Métrica principal do teste (MDF do bluff-catcher QQ) converge
+     bem e é estável**: rodando 5k/10k/20k/35k/50k/75k/100k iterações
+     nesse spot, o erro caiu de 0.133 (5k) pra ~0.011-0.016 a partir de
+     35k, e ficou parado nessa faixa até 100k -- sinal claro de
+     convergência real, não coincidência de uma rodada só.
+  3. **Métrica secundária (frequência de aposta de AA/KK na raiz) NÃO
+     estabilizou** mesmo em 150k iterações -- ficou subindo de forma
+     ruidosa (AA: 19% em 5k -> 62% em 100k -> ainda subindo em 150k).
+     O comentário do teste espera "quase sempre" pras mãos de valor, o
+     que não bateu. Investigação: o regret_sum acumulado de "check" e
+     "bet" fica sempre positivo e da mesma ordem de grandeza nos dois
+     (nenhum domina o outro claramente), e o regret médio por iteração
+     é pequeno (< 0.1% do pote) -- consistente com quase-indiferença
+     entre as duas ações nesse spot específico, não com erro de
+     cálculo. Hipótese mais provável: o IP desse teste só tem UMA
+     classe de mão (QQ), não um range real -- contra um range travado
+     assim, apostar vs. dar check com o nut pode genuinamente valer
+     quase o mesmo, e a variância de sortear 2 cartas por chance node
+     (turn+river) torna esse empate técnico ainda mais lento pra
+     "decidir" que qualquer decisão bem definida por uma fórmula fechada
+     (como a MDF acima). **Não é uma confirmação de bug, mas também não
+     é uma confirmação de que está certo** -- falta uma ferramenta de
+     exploitability rigorosa pra board incompleto (hoje só existe pro
+     river, `compute_exploitability()`) pra fechar essa dúvida de vez.
+     Próximo passo, se for continuar: (a) rodar um range de IP mais
+     realista (não uma classe só) e ver se a frequência de AA/KK
+     estabiliza mais rápido, ou (b) estender `compute_exploitability()`
+     pra cobrir board de 3/4 cartas (exigiria enumerar os nós de
+     chance exatamente, não por amostragem).
 - ⏳ Squeeze (multiway) — arquitetura pronta (mesmo motor multiway
   acima), não validado num spot de squeeze de verdade ainda (só no
   caso degenerado de 2 jogadores).
