@@ -411,6 +411,7 @@ class PostflopSolver:
                         "oop", ca, cb, 0.0, 0.0, p_oop, p_ip, "", is_second=False, board=self.board0,
                     )
             self.trainer.discount(t)
+        self.trainer.finalize()
 
     def strategy(self, actor, node="root", hand_class=None):
         """Acesso à estratégia média de um infoset especifico. `node`:
