@@ -210,5 +210,11 @@ def run_rfi_jam_batch(job_id: str | None, matchups: list[str], stacks_bb: list[f
                 }).eq("id", job_id).execute()
 
     if client:
-        client.table("drills").insert(results).execute()
+        # upsert (nao insert): re-rodar um spot que ja existe e' o caso
+        # NORMAL aqui -- sobe-se iterações pra melhorar convergência e
+        # regrava-se a mesma linha. Com insert, o job resolvia os milhões
+        # de iterações inteiros e so' entao morria com "duplicate key
+        # violates drills_pkey", perdendo o trabalho todo (aconteceu 3x
+        # em producao antes dessa correcao).
+        client.table("drills").upsert(results, on_conflict="spot_id").execute()
     return results

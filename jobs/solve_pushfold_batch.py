@@ -6,10 +6,9 @@ Mapeamento de colunas em `build_drill_row()` CONFERIDO contra o schema
 real da tabela (via `list_tables`/`information_schema.columns`) — bate
 exatamente (spot_id, board, pot, effective_stack, gto_nodes, solution,
 format, stack_bb, position, street, action, engine_version,
-exploitability, solver_job_id, generated_at). Ainda falta criar a
-tabela `solver_jobs` (usada por `api/main.py` e pelo update de
-progresso abaixo) — ver README, seção "Pendente antes do primeiro job
-real".
+exploitability, solver_job_id, generated_at). A tabela `solver_jobs`
+(usada por `api/main.py` e pelo update de progresso abaixo) ja existe
+em producao — ver README.
 
 Também adiciona (por decisão registrada): exploitability, config do
 motor e versão do engine em cada linha — é o log de convergência que
@@ -19,7 +18,6 @@ tão demorado. Sem isso de novo, nunca mais.
 
 import datetime
 import sys
-import uuid
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -102,7 +100,12 @@ def run_pushfold_batch(job_id: str, stacks_bb: list[float], table_context: dict,
         strat = solver.average_strategy()
         exploitability = compute_exploitability_estimate(solver, strat)
 
-        spot_id = f"pushfold_icm_{int(stack)}bb_sb_vs_bb_{uuid.uuid4().hex[:8]}"
+        # Deterministico de proposito (sem uuid no fim): o spot_id e' a
+        # identidade do spot -- mesmo matchup + mesmo stack e' a MESMA
+        # linha, regravada pelo upsert abaixo. Com uuid, cada execucao
+        # criava uma linha nova e o treino sorteava entre versoes
+        # duplicadas do mesmo spot.
+        spot_id = f"pushfold_icm_{int(stack)}bb_sb_vs_bb"
         row = build_drill_row(spot_id, solver, strat, exploitability, job_id, stack_bb=stack)
         results.append(row)
 
@@ -113,6 +116,8 @@ def run_pushfold_batch(job_id: str, stacks_bb: list[float], table_context: dict,
         }).eq("id", job_id).execute()
 
     # upload em lote no final (poderia ser incremental tambem, se preferir
-    # ver os spots aparecendo um a um no Supabase durante o job)
-    client.table("drills").insert(results).execute()
+    # ver os spots aparecendo um a um no Supabase durante o job) -- upsert
+    # pelo mesmo motivo do batch de RFI/Jam: re-rodar um spot com mais
+    # iteracoes regrava a linha em vez de estourar duplicate key.
+    client.table("drills").upsert(results, on_conflict="spot_id").execute()
     return results
