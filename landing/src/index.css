@@ -1,0 +1,76 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    color-scheme: dark;
+  }
+
+  html {
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  body {
+    @apply bg-abyss-900 text-slate-300 font-sans;
+    font-feature-settings: "cv02", "cv03", "cv04", "ss01";
+  }
+
+  /* Compensa o header fixo ao navegar por âncoras. */
+  section[id] {
+    scroll-margin-top: 5.5rem;
+  }
+
+  ::selection {
+    @apply bg-emerald-500/30 text-emerald-100;
+  }
+
+  ::-webkit-scrollbar {
+    width: 10px;
+  }
+  ::-webkit-scrollbar-track {
+    @apply bg-abyss-950;
+  }
+  ::-webkit-scrollbar-thumb {
+    @apply bg-white/10 rounded-full border-2 border-abyss-950;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    @apply bg-emerald-500/40;
+  }
+}
+
+@layer components {
+  /* Superfície glassmorphism padrão do design system PokerSync. */
+  .glass-panel {
+    @apply relative rounded-2xl border border-white/10 bg-white/[0.03] backdrop-blur-md;
+  }
+
+  .glass-panel-emerald {
+    @apply relative rounded-2xl border border-emerald-500/20 bg-gradient-to-b from-emerald-500/[0.07] to-white/[0.02] backdrop-blur-md;
+  }
+
+  /* Texto de gradiente para headlines de alto impacto. */
+  .text-gradient-emerald {
+    @apply bg-gradient-to-br from-emerald-300 via-emerald-400 to-teal-500 bg-clip-text text-transparent;
+  }
+
+  .text-gradient-light {
+    @apply bg-gradient-to-br from-white via-slate-100 to-slate-400 bg-clip-text text-transparent;
+  }
+
+  /* Números tabulares para métricas financeiras (evita "dança" de dígitos). */
+  .tabular {
+    font-variant-numeric: tabular-nums;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
