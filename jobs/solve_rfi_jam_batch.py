@@ -60,7 +60,7 @@ def build_drill_row(spot_id: str, matchup: str, solver: RfiJamSolver, strat: dic
     first_class = solver.classes[0]
     gto_nodes = {
         "sb_open": _compact_phase(phase_hands("sb_open", "open"), "open", evs["sb_open"][first_class]["fold"]),
-        "bb_jam": _compact_phase(phase_hands("bb_jam", "jam"), "jam", evs["bb_jam"][first_class]["fold"]),
+        "bb_jam": _compact_phase(phase_hands("bb_jam", "jam"), "allin", evs["bb_jam"][first_class]["fold"]),
         "sb_call_jam": _compact_phase(phase_hands("sb_call_jam", "call"), "call", evs["sb_call_jam"][first_class]["fold"]),
     }
 
