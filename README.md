@@ -83,6 +83,44 @@ await fetch(`${SOLVER_API_URL}/jobs/pushfold`, {
 });
 ```
 
+## cEV/ICM de uma mão jogada (2026-08)
+
+Diferente dos jobs acima (geram tabela de range offline, minutos), este é
+resolução SÍNCRONA — recebe uma mão específica que já foi jogada e devolve
+o $EV daquele momento, em <1s, sem treinar CFR (cálculo analítico direto:
+equity real via Monte Carlo + ICM Malmuth-Harville, ver
+`engine/hand_cev.py`).
+
+**Escopo desta primeira versão:** só cobre all-in HEADS-UP com as duas mãos
+CONHECIDAS (foram a showdown e mostraram). Sem vilão sabido, ou all-in
+multiway, o endpoint não tenta adivinhar — retorna erro em vez de estimar
+com um range assumido sem base.
+
+```ts
+const res = await fetch(`${SOLVER_API_URL}/hands/compute_cev`, {
+  method: "POST",
+  headers: {
+    "Content-Type": "application/json",
+    "X-API-Key": process.env.SOLVER_API_KEY!,
+  },
+  body: JSON.stringify({
+    hero_combo: "AhAd",
+    villain_combo: "KsKc",
+    hero_stack_before: 3000,
+    villain_stack_before: 3000,
+    other_stacks: [8000, 5000], // demais jogadores da mesa, parados nesse momento
+    payouts: [500, 300, 200], // tournament_payouts.places do produto
+  }),
+});
+// { hero_equity_pct, hero_expected_chip_delta, hero_expected_icm_dollars,
+//   hero_icm_baseline_dollars, hero_expected_icm_delta_dollars, ... }
+```
+
+Não grava nada no Supabase — é stateless, o produto decide o que fazer com
+o resultado (ex: comparar `hero_expected_icm_delta_dollars` contra o
+resultado real da mão pra achar o "luck-adjusted" delta, e somar isso ao
+longo do tempo pra virar Net Expected Profit / EV ROI%).
+
 ## Status do motor (o que já foi validado)
 
 - ✅ Núcleo CFR (Discounted CFR + regret matching) — validado contra
