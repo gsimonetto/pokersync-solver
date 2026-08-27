@@ -1,16 +1,23 @@
 """
-API mínima do pokersync-solver: só o suficiente pra disparar e
-monitorar jobs em lote (decisão registrada: sem resolução sob demanda
-ainda, isso fica pra quando o Hand Replayer precisar).
+API mínima do pokersync-solver: dispara/monitora jobs em lote, e agora
+também resolve sob demanda o cEV/ICM de uma mão específica (2026-08 —
+era a exceção registrada no comentário antigo deste arquivo: "isso fica
+pra quando o Hand Replayer precisar" — chegou essa hora).
 
 Endpoints:
-  POST /jobs/pushfold   -> dispara um job de geração de spots shove/fold
-  POST /jobs/rfi_jam    -> dispara um job de geração de spots RFI/jam
-                            (matchups já validados, ver MATCHUPS em
-                            jobs/solve_rfi_jam_batch.py)
-  GET  /jobs/{job_id}   -> consulta status (tambem pode ser lido direto
-                            do Supabase pela tabela `solver_jobs`, esse
-                            endpoint existe só por conveniência/uniformidade)
+  POST /jobs/pushfold      -> dispara um job de geração de spots shove/fold
+  POST /jobs/rfi_jam       -> dispara um job de geração de spots RFI/jam
+                               (matchups já validados, ver MATCHUPS em
+                               jobs/solve_rfi_jam_batch.py)
+  GET  /jobs/{job_id}      -> consulta status (tambem pode ser lido direto
+                               do Supabase pela tabela `solver_jobs`, esse
+                               endpoint existe só por conveniência/uniformidade)
+  POST /hands/compute_cev  -> cEV/ICM de UMA mão jogada (all-in heads-up
+                               com as duas mãos conhecidas) — síncrono,
+                               <1s, sem treino de CFR (cálculo analítico
+                               direto, ver engine/hand_cev.py). Não grava
+                               nada no Supabase — o produto decide o que
+                               fazer com o resultado.
 
 Autenticação: header `X-API-Key`, comparado contra SOLVER_API_KEY.
 """
@@ -27,6 +34,7 @@ from jobs.supabase_client import get_client
 from jobs.solve_pushfold_batch import run_pushfold_batch
 from jobs.solve_rfi_jam_batch import run_rfi_jam_batch
 from engine.equity_final import build_final_equity_matrix
+from engine.hand_cev import compute_hand_cev, HandCevError
 
 app = FastAPI(title="PokerSync Solver API", version="0.1.0")
 
@@ -154,6 +162,35 @@ def get_job(job_id: str, x_api_key: Optional[str] = Header(default=None)):
     if not result.data:
         raise HTTPException(status_code=404, detail="Job nao encontrado")
     return result.data
+
+
+class HandCevRequest(BaseModel):
+    hero_combo: str  # ex "AhKd" — cartas do hero, mostradas no showdown
+    villain_combo: str  # ex "QcQh" — cartas do vilão, mostradas no showdown
+    hero_stack_before: float
+    villain_stack_before: float
+    other_stacks: list[float] = []
+    payouts: list[float]
+    iterations: int = 5000
+
+
+@app.post("/hands/compute_cev")
+def compute_cev(req: HandCevRequest, x_api_key: Optional[str] = Header(default=None)):
+    check_api_key(x_api_key)
+    try:
+        return compute_hand_cev(
+            hero_combo=req.hero_combo,
+            villain_combo=req.villain_combo,
+            hero_stack_before=req.hero_stack_before,
+            villain_stack_before=req.villain_stack_before,
+            other_stacks=req.other_stacks,
+            hero_seat_idx=0,
+            villain_seat_idx=1,
+            payouts=req.payouts,
+            iterations=req.iterations,
+        )
+    except HandCevError as e:
+        raise HTTPException(status_code=422, detail=str(e))
 
 
 @app.get("/health")
