@@ -153,6 +153,30 @@ longo do tempo pra virar Net Expected Profit / EV ROI%).
   comportamento) — ainda não geramos nem subimos nenhum spot multi-
   tamanho pro Supabase; falta decidir os tamanhos (ex 2x/2.5x/3x) e
   atualizar o job + o schema de `gto_nodes` + o frontend pra consumir.
+- ✅ **Ante** (2026-08, bug real corrigido) — até aqui o motor de RFI/jam
+  nunca modelava ante nenhum, resolvia como se o pote fosse só blinds.
+  Toda mão real de MTT do produto tem ante (conferido contra 203 mãos
+  reais importadas por um usuário: nenhuma sem ante) — os spots gerados
+  representavam um jogo diferente do que se joga de verdade. Corrigido
+  com o parâmetro `ante_pool` em `RfiJamSolver` (`engine/rfi_jam.py`):
+  diferente de `dead_money` (blind de terceiro, só conta se alguém de
+  fato "isolar" — por isso fica de fora do nó "abridor desiste de
+  cara"), ante já está morto desde antes de qualquer decisão, então
+  **entra também** nesse nó (o defensor leva por W.O. mesmo que o
+  abridor desista sem brigar). `jobs/solve_rfi_jam_batch.py::
+  run_rfi_jam_batch` ganhou `ante_bb`/`table_size` (default 0.0/8 —
+  `ante_bb=0` reproduz o comportamento de sempre, spot_id só ganha
+  sufixo `_ante{X}` quando `ante_bb>0`, nunca sobrescreve os spots já
+  em produção). Validado em `tests/rfi_jam_ante.py`: (1) regressão —
+  `ante_pool=0.0` bate bit-a-bit com a fórmula antiga nos 4 terminais;
+  (2) sanidade — ante realista (12,5% do bb × 8 assentos, faixa
+  observada nas mãos reais) alarga o range de abertura do SB de 69%
+  pra 78% dos combos (fato conhecido de teoria de jogo: mais dead money
+  = pote melhor pra roubar), com exploitability no mesmo patamar.
+  **Falta**: rodar `jobs/solve_rfi_jam_batch.py` de novo com
+  `ante_bb`/`table_size` reais pra cada faixa de nível de torneio e
+  subir os spots `_ante` pro Supabase — o motor está pronto, os spots
+  publicados ainda não foram regerados.
 - ⏳ CO vs BTN e UTG vs BB — bloqueados como matchup heads-up (2
   jogadores) — a aproximação de "dead money" só é precisa com no
   máximo 1 jogador pulado (BTN vs BB). **Resolvido via motor

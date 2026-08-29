@@ -14,6 +14,19 @@ completo (ver engine/multiway_rfi.py), que ficou provado inviável
 computacionalmente com Monte Carlo em tempo real (ver decisão
 registrada). Não usar dead_money como aproximação pra esses dois sem
 validar de novo -- foi descartado por imprecisão.
+
+Ante (2026-08, bug real): até aqui nenhum spot gerado contava ante --
+toda mão real de MTT do produto tem ante (conferido contra 203 mãos
+reais da conta do usuário: NENHUMA sem ante), mas o motor resolvia
+como se o pote fosse só blind. `ante_bb` (novo parâmetro de
+run_rfi_jam_batch, default 0.0 = comportamento antigo intacto) é o
+ante de CADA jogador em bb; `table_size` (default 8, tamanho de mesa
+mais comum nas mãos reais analisadas) é quantos assentos estão
+pagando ante nessa mão -- `ante_pool = ante_bb * table_size` é
+repassado pro solver (ver engine/rfi_jam.py::ante_pool). Com
+ante_bb=0 os spots saem BIT A BIT iguais aos gerados antes dessa
+mudança (mesmo teste de regressão já usado pra multi-size, ver
+tests/rfi_jam_ante.py).
 """
 
 import datetime
@@ -26,6 +39,7 @@ from jobs.supabase_client import get_client  # noqa: E402
 
 ENGINE_VERSION = "pokersync-solver-v0.3.0-rfi-jam-validated"
 ENGINE_VERSION_MULTISIZE = "pokersync-solver-v0.4.0-rfi-jam-multisize"
+ENGINE_VERSION_ANTE = "pokersync-solver-v0.5.0-rfi-jam-ante"
 
 # posts/dead_money por matchup -- só adicionar um matchup novo aqui
 # depois de validar exploitability com compute_exploitability()
@@ -50,7 +64,11 @@ def _compact_phase(phase_hands: dict, action_name: str, ev_fold: float) -> dict:
 
 def build_drill_row(spot_id: str, matchup: str, solver: RfiJamSolver, strat: dict,
                      evs: dict, exploitability: float, job_id: str | None, stack_bb: float):
-    pot = solver.opener_post + solver.defender_post
+    # + dead_money + ante_pool: sem isso o "pot" exibido pro usuario ficava
+    # so' os blinds, escondendo o ante que ja esta contado na estrategia
+    # (solver.ante_pool eh 0.0 quando ante_bb=0, entao nao muda nada pros
+    # spots antigos).
+    pot = solver.opener_post + solver.defender_post + solver.dead_money + solver.ante_pool
 
     def phase_hands(prob_key: str, ev_key: str):
         return {
@@ -109,7 +127,7 @@ def build_drill_row_multisize(spot_id: str, matchup: str, solver: RfiJamSolver, 
     gto_nodes eh o jeito do frontend detectar "isso eh multi-tamanho"
     sem precisar inspecionar a forma de cada fase.
     """
-    pot = solver.opener_post + solver.defender_post
+    pot = solver.opener_post + solver.defender_post + solver.dead_money + solver.ante_pool
     sizes = solver.sizes
     first_class = solver.classes[0]
 
@@ -159,7 +177,8 @@ def build_drill_row_multisize(spot_id: str, matchup: str, solver: RfiJamSolver, 
 def run_rfi_jam_batch(job_id: str | None, matchups: list[str], stacks_bb: list[float],
                        other_stacks: list[float], payouts: list[float], equity_matrix, classes,
                        open_size=2.2, open_sizes: list[float] | None = None,
-                       iterations=2_500_000, dry_run=False):
+                       iterations=2_500_000, dry_run=False,
+                       ante_bb: float = 0.0, table_size: int = 8):
     """
     Roda o batch completo (matchups x stacks) e sobe pro Supabase --
     a menos que dry_run=True, aí só retorna as rows sem inserir (útil
@@ -171,10 +190,24 @@ def run_rfi_jam_batch(job_id: str | None, matchups: list[str], stacks_bb: list[f
     nem substituir os spots de 1 tamanho já validados/em produção.
     Sem `open_sizes`, comportamento idêntico a antes (`open_size`
     escalar, formato antigo) -- nenhuma mudança pro que já existe.
+
+    `ante_bb` (2026-08): ante de CADA jogador, em bb (ex 0.125 pra um
+    ante de 12,5% do BB, típico de MTT real -- conferido contra mãos
+    reais da conta do usuário: 30/250, 35/300, 20/160, 25/200, 36/250 --
+    todas na faixa 12-15%). `table_size` é quantos assentos pagam ante
+    nessa mão (default 8, o mais comum nas mãos reais analisadas).
+    `ante_pool = ante_bb * table_size` vai pro solver (ver
+    engine/rfi_jam.py). Default ante_bb=0.0 mantém o comportamento de
+    sempre — spot_id só ganha o sufixo "_ante" quando ante_bb>0, pra
+    NUNCA sobrescrever os spots sem ante já em produção (mesma cautela
+    já usada pro sufixo "_msize").
     """
     client = None if dry_run else get_client()
     results = []
     multisize = bool(open_sizes and len(open_sizes) > 1)
+    ante_pool = ante_bb * table_size
+    ante_suffix = f"_ante{ante_bb}" if ante_pool > 0 else ""
+    engine_version = ENGINE_VERSION_ANTE if ante_pool > 0 else ENGINE_VERSION
 
     for matchup in matchups:
         if matchup not in MATCHUPS:
@@ -188,7 +221,7 @@ def run_rfi_jam_batch(job_id: str | None, matchups: list[str], stacks_bb: list[f
                 equity_matrix=equity_matrix, classes=classes,
                 open_size=open_size, open_sizes=open_sizes,
                 effective_stack=stack, opener_post=opener_post, defender_post=defender_post,
-                dead_money=dead_money,
+                dead_money=dead_money, ante_pool=ante_pool,
             )
             solver.train(iterations=iterations)
             strat = solver.average_strategy()
@@ -196,11 +229,14 @@ def run_rfi_jam_batch(job_id: str | None, matchups: list[str], stacks_bb: list[f
             br_sb, br_bb = solver.compute_exploitability(strat)
 
             if multisize:
-                spot_id = f"rfi_jam_{matchup}_{int(stack)}bb_msize"
+                spot_id = f"rfi_jam_{matchup}_{int(stack)}bb_msize{ante_suffix}"
                 row = build_drill_row_multisize(spot_id, matchup, solver, strat, evs, br_sb + br_bb, job_id, stack)
+                if ante_pool > 0:
+                    row["engine_version"] = engine_version
             else:
-                spot_id = f"rfi_jam_{matchup}_{int(stack)}bb"
+                spot_id = f"rfi_jam_{matchup}_{int(stack)}bb{ante_suffix}"
                 row = build_drill_row(spot_id, matchup, solver, strat, evs, br_sb + br_bb, job_id, stack)
+                row["engine_version"] = engine_version
             results.append(row)
 
             if client and job_id:

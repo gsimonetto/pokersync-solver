@@ -97,12 +97,32 @@ class RfiJamSolver:
     bolso de nenhum dos dois jogadores modelados. Sem isso, matchups
     tipo CO vs BTN ficam sem sentido (abrir e ganhar sem war da 0 de
     lucro em fichas, o que so faz sentido se SB/BB nao existissem).
+
+    ante_pool (2026-08, bug real: motor nunca modelava ante nenhum --
+    toda mao real de torneio do produto tem ante, so' os spots gerados
+    nao contavam) representa o ante de TODOS os jogadores ainda na mao
+    (os N assentos da mesa, incluindo os 2 modelados) somado. Parece
+    dead_money a primeira vista mas tem uma diferenca de fundo: blind
+    de terceiro so' fica "isolado" se alguem de fato brigar por ele --
+    se o abridor desiste de cara aqui, na vida real quem tinha aquele
+    blind (SB/BB nao-modelado) ainda esta na mao e pode fazer qualquer
+    coisa, entao nao da pra cravar que o defensor modelado vai ficar
+    com ele (por isso dead_money fica de fora do no' de fold na raiz,
+    ver icm_fold_root). Ante e' diferente: e' forcado de TODO MUNDO
+    ANTES de qualquer decisao, ja esta morto desde o t=0 da mao --
+    n incide em quem desiste ou nao depois. Se o abridor desiste de
+    cara aqui, o defensor ainda leva o ante de todo mundo (inclusive
+    do proprio abridor) por W.O., entao ante_pool ENTRA em icm_fold_root
+    tambem (unica diferenca de tratamento vs dead_money). Convencao de
+    contabilidade igual a de dead_money nos outros 3 terminais: fichas
+    que nao vem do bolso rastreado de nenhum dos 2 jogadores modelados
+    (mesma aproximacao ja aceita/validada pra dead_money).
     """
 
     def __init__(self, sb_idx, bb_idx, table_stacks, payouts, equity_matrix, classes,
                  open_size=2.2, open_sizes: Sequence[float] | None = None,
                  effective_stack=None, opener_post=0.5, defender_post=1.0,
-                 dead_money=0.0):
+                 dead_money=0.0, ante_pool=0.0):
         self.sb_idx = sb_idx  # "opener" (nome mantido por compatibilidade)
         self.bb_idx = bb_idx  # "defender"
         self.table_stacks = list(table_stacks)
@@ -126,6 +146,7 @@ class RfiJamSolver:
         self.opener_post = opener_post
         self.defender_post = defender_post
         self.dead_money = dead_money
+        self.ante_pool = ante_pool
 
         n_root_actions = 1 + len(self.sizes)  # fold + 1 por tamanho
         self.sb_root = {c: InfoSet(n_root_actions) for c in classes}
@@ -147,27 +168,29 @@ class RfiJamSolver:
         return eq[self.sb_idx], eq[self.bb_idx]
 
     def _precompute_icm_terminals(self):
-        T, dm = self.T, self.dead_money
+        T, dm, ap = self.T, self.dead_money, self.ante_pool
         op, dp = self.opener_post, self.defender_post
-        # opener folda na raiz: dead_money nao entra aqui -- so se aplica
-        # quando o opener efetivamente abre e "isola" os blinds mortos
-        self.icm_fold_root = self._icm_pair(-op, +op)
+        # opener folda na raiz: dead_money NAO entra aqui (contingente --
+        # ver docstring da classe), mas ante_pool SIM -- ja estava morto
+        # desde antes de qualquer decisao, o defensor leva por W.O.
+        self.icm_fold_root = self._icm_pair(-op, +op + ap)
         # opener abriu (qualquer tamanho), defender folda: opener ganha o
         # que a defender postou MAIS os blinds mortos de quem ja foldou
-        # antes -- NAO depende do tamanho da abertura (se todo mundo
-        # folda, o opener so recupera o proprio dinheiro, que era dele
-        # mesmo; o tamanho da abertura em si nao muda esse resultado).
-        self.icm_bb_fold_vs_raise = self._icm_pair(+dp + dm, -dp)
+        # antes MAIS o ante de todo mundo -- NAO depende do tamanho da
+        # abertura (se todo mundo folda, o opener so recupera o proprio
+        # dinheiro, que era dele mesmo; o tamanho da abertura em si nao
+        # muda esse resultado).
+        self.icm_bb_fold_vs_raise = self._icm_pair(+dp + dm + ap, -dp)
         # opener folda pro jam DEPOIS de ter aberto tamanho R: opener
-        # perde R (o que ja tinha posto), defender ganha R + dead money.
-        # Isso SIM depende do tamanho -- abrir maior custa mais caro se
-        # sair foldando depois.
-        self.icm_sb_fold_vs_jam = {s: self._icm_pair(-s, +s + self.dead_money) for s in self.sizes}
-        # showdown: o vencedor leva os dois stacks efetivos + dead money
-        # -- nao depende do tamanho da abertura (quem paga o jam poe o
-        # stack efetivo inteiro, independente de quanto tinha aberto).
-        self.icm_showdown_sbwins = self._icm_pair(+T + dm, -T)
-        self.icm_showdown_bbwins = self._icm_pair(-T, +T + dm)
+        # perde R (o que ja tinha posto), defender ganha R + dead money +
+        # ante. Isso SIM depende do tamanho -- abrir maior custa mais caro
+        # se sair foldando depois.
+        self.icm_sb_fold_vs_jam = {s: self._icm_pair(-s, +s + dm + ap) for s in self.sizes}
+        # showdown: o vencedor leva os dois stacks efetivos + dead money +
+        # ante -- nao depende do tamanho da abertura (quem paga o jam poe
+        # o stack efetivo inteiro, independente de quanto tinha aberto).
+        self.icm_showdown_sbwins = self._icm_pair(+T + dm + ap, -T)
+        self.icm_showdown_bbwins = self._icm_pair(-T, +T + dm + ap)
 
     def _equity(self, sb_class, bb_class):
         return self.equity_matrix[(sb_class, bb_class)]
