@@ -187,9 +187,11 @@ longo do tempo pra virar Net Expected Profit / EV ROI%).
   corretamente perto de 100%. Achei e corrigi 1 bug real durante essa
   validação (o abridor estava usando o mecanismo de decisão errado —
   fold-ou-jam em vez de fold-ou-abrir). **Não tem o mesmo nível de
-  validação de exploitability rigorosa que o motor heads-up** (best
-  response completo pra N jogadores não foi implementado — é mais
-  complexo que o caso de 2 jogadores). Mãos de fronteira podem
+  validação de exploitability rigorosa que o motor heads-up** (o
+  heads-up faz best response EXATO por enumeração completa de pares de
+  classe; aqui é via Monte Carlo — ver item 3 abaixo — porque com 4+
+  seats não dá pra enumerar tudo: 169^4 combinações só pra 4
+  jogadores). Mãos de fronteira podem
   oscilar bastante entre rodadas (mesmo fenômeno já documentado no
   heads-up, não é bug). É lento por natureza (equity multiway via
   Monte Carlo) — pensado pra rodar OFFLINE, no seu PC, por
@@ -229,12 +231,42 @@ longo do tempo pra virar Net Expected Profit / EV ROI%).
     teste de convergência completo como o do heads-up aqui — motor
     multiway é lento demais nesse sandbox pra caber em teste unitário
     — então a validação é direta nos terminais, sem treinar o CFR
-    inteiro).
-    **Falta**: apagar `checkpoint_CO_vs_BB_*bb.pkl` e
-    `resultado_CO_vs_BB_15bb.pkl`/`25bb.pkl` (os que já rodaram sem os
-    fixes) e rodar `run_offline_all_positions.py` de novo do zero pra
-    essas combinações — o fix de blind morto muda o resultado mesmo
-    sem ante, então não tem como "só continuar" do checkpoint antigo.
+    inteiro). **Recorrida** (usuário apagou os `resultado_`/
+    `checkpoint_CO_vs_BB_15bb`/`25bb.pkl` antigos e já está rodando
+    `run_offline_all_positions.py` do zero com os fixes, no PC dele).
+  - ✅ **Exploitability + upload, adicionados depois (2026-08)** — até
+    aqui faltavam 2 peças pra fechar o ciclo desse motor:
+    3. **Sem métrica de convergência**: o `resultado_*.pkl` só trazia
+       `config`/`strategy`/`iterations`, nada que dissesse "isso
+       convergiu bem?". Adicionado `best_response_value`/
+       `compute_exploitability` em `MultiwayRfiSolver` — Monte Carlo
+       (cada seat, um de cada vez, joga a ação de maior ICM em toda
+       decisão própria enquanto os outros seguem a média já
+       convergida; a soma das best responses por seat é a métrica,
+       mesma convenção do motor heads-up — termômetro comparável entre
+       runs, não exploitability literal em $). `run_offline_all_
+       positions.py` agora calcula isso uma vez no fim de cada
+       combinação e grava `exploitability`/`best_response_by_seat` no
+       `resultado_*.pkl`. Validado em `test_exploitability_runs`
+       (roda de ponta a ponta, devolve número finito por seat — não dá
+       pra validar a DIREÇÃO do valor sem treinar por muito mais tempo
+       que cabe em teste unitário).
+    4. **Sem script de upload**: diferente do heads-up
+       (`run_offline_rfi_jam_ante.py::upload_results`), não existia
+       nada que lesse os `resultado_*.pkl` multiway e subisse pro
+       Supabase. Adicionado `build_drill_row`/`upload_results` direto
+       em `run_offline_all_positions.py` (`python3
+       run_offline_all_positions.py --upload`). Schema do `gto_nodes`
+       é mais simples que o do heads-up: só frequência por mão/seat/
+       fase (`phase1`/`phase2`), sem EV nem gap por mão — isso exigiria
+       um equivalente de `compute_action_evs` que este motor não tem
+       (EV exato por classe não escala pra N jogadores do jeito que
+       escala pra 2). `spot_id` usa prefixo novo (`rfi_multiway_...`,
+       `action="rfi_multiway"`) pra não colidir com os spots
+       heads-up (`rfi_jam_...`) — **o frontend ainda não consome esse
+       formato**, então subir os spots é seguro (não quebra nada em
+       produção), mas vai precisar de trabalho de frontend depois pra
+       exibir.
 - ⏳ 3-bet "de verdade" (não all-in) pré-flop — não iniciado. A árvore
   de RFI atual trata qualquer resposta a um raise como shove (correto
   pra stack curto/médio, não serve pra stack profundo).

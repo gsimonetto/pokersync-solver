@@ -317,3 +317,76 @@ class MultiwayRfiSolver:
                 for i in range(self.n_seats)
             ],
         }
+
+    @staticmethod
+    def _blend(icm_a, icm_b, weight_a, weight_b):
+        all_seats = set(icm_a.keys()) | set(icm_b.keys())
+        return {s: weight_a * icm_a.get(s, 0.0) + weight_b * icm_b.get(s, 0.0) for s in all_seats}
+
+    def best_response_value(self, br_seat, avg_strategy=None, iterations=1000, seed=123):
+        """Estima (via Monte Carlo) o quanto `br_seat` ganharia se jogasse
+        SEMPRE a ação ótima (maior ICM) em cada decisão dele, enquanto
+        todos os outros seats seguem `avg_strategy` (a média já
+        convergida). Diferente do motor heads-up (`rfi_jam.py`), aqui não
+        dá pra enumerar todas as combinações de mão exatamente -- com 4+
+        seats isso explode (169^4 combinações só pra 4 jogadores) -- por
+        isso a amostragem, igual já é feita no treino (`train`) e na
+        equity multiway (`_multiway_eq`)."""
+        if avg_strategy is None:
+            avg_strategy = self.average_strategy()
+        random.seed(seed)
+        classes_list = self.classes
+        weights_list = [self.weights_norm[c] for c in classes_list]
+        total = 0.0
+        for _ in range(iterations):
+            hands = {i: random.choices(classes_list, weights=weights_list, k=1)[0]
+                      for i in range(self.n_seats)}
+            icm = self._br_open_or_fold(br_seat, avg_strategy, hands)
+            total += icm.get(br_seat, 0.0)
+        return total / iterations
+
+    def compute_exploitability(self, avg_strategy=None, iterations=1000, seed=123):
+        """Best response de cada seat, um de cada vez (mesma convenção do
+        motor heads-up: soma das best responses, não uma diferença contra
+        o valor sob a média -- serve como termômetro de convergência
+        comparável entre runs, não como exploitability literal em $)."""
+        if avg_strategy is None:
+            avg_strategy = self.average_strategy()
+        return {
+            i: self.best_response_value(i, avg_strategy, iterations=iterations, seed=seed)
+            for i in range(self.n_seats)
+        }
+
+    def _br_open_or_fold(self, br_seat, avg, hands):
+        icm_fold = self._icm_fold_root(hands)
+        icm_open = self._br_fold_or_jam(1, br_seat, avg, hands)
+        if br_seat == 0:
+            return icm_open if icm_open.get(0, 0.0) > icm_fold.get(0, 0.0) else icm_fold
+        p_open = avg["phase1"][0][hands[0]]
+        return self._blend(icm_fold, icm_open, 1 - p_open, p_open)
+
+    def _br_fold_or_jam(self, seat_i, br_seat, avg, hands):
+        if seat_i >= self.n_seats:
+            return self._terminal_all_fold(hands)
+        icm_fold = self._br_fold_or_jam(seat_i + 1, br_seat, avg, hands)
+        icm_jam = self._br_phase2(seat_i, br_seat, avg, hands)
+        if seat_i == br_seat:
+            return icm_jam if icm_jam.get(seat_i, 0.0) > icm_fold.get(seat_i, 0.0) else icm_fold
+        p_jam = avg["phase1"][seat_i][hands[seat_i]]
+        return self._blend(icm_fold, icm_jam, 1 - p_jam, p_jam)
+
+    def _br_phase2(self, jammer, br_seat, avg, hands):
+        responders = [i for i in range(self.n_seats) if i > jammer]
+        responders.append(0)
+        return self._br_resolve_responders(jammer, responders, 0, {jammer}, br_seat, avg, hands)
+
+    def _br_resolve_responders(self, jammer, responders, idx, live_set, br_seat, avg, hands):
+        if idx >= len(responders):
+            return self._showdown(live_set, hands)
+        seat_i = responders[idx]
+        icm_fold = self._br_resolve_responders(jammer, responders, idx + 1, live_set, br_seat, avg, hands)
+        icm_call = self._br_resolve_responders(jammer, responders, idx + 1, live_set | {seat_i}, br_seat, avg, hands)
+        if seat_i == br_seat:
+            return icm_call if icm_call.get(seat_i, 0.0) > icm_fold.get(seat_i, 0.0) else icm_fold
+        p_call = avg["phase2"][seat_i][hands[seat_i]]
+        return self._blend(icm_fold, icm_call, 1 - p_call, p_call)

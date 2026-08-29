@@ -1,5 +1,5 @@
 """
-Validação de dois fixes em engine/multiway_rfi.py (motor usado por
+Validação de fixes/adições em engine/multiway_rfi.py (motor usado por
 run_offline_all_positions.py pra CO/HJ/MP/UTG+1/UTG vs BB).
 
 Contexto (2026-08): o usuário rodou o fim de semana inteiro gerando
@@ -41,6 +41,25 @@ ERRADO nesse cenário. O que se testa é:
      run_offline_all_positions.py), então um teste de convergência
      completo (como o de tests/rfi_jam_ante.py) não é viável aqui em
      tempo de teste unitário.
+
+3. FALTA DE EXPLOITABILITY: diferente de rfi_jam.py (que tem
+   `compute_exploitability` via best response exato, por enumeração
+   completa de pares de classe), este motor não tinha NADA equivalente
+   -- o `resultado_*.pkl` final não trazia nenhuma métrica de quão
+   convergido o treino estava. Adicionado `best_response_value`/
+   `compute_exploitability` via Monte Carlo (não dá pra enumerar exato
+   com 4+ seats -- 169^4 combinações só pra 4 jogadores): cada seat, um
+   de cada vez, joga a ação de MAIOR ICM em toda decisão própria
+   enquanto os outros seguem a média já convergida; a soma das best
+   responses por seat é a métrica de exploitability (mesma convenção
+   do motor heads-up -- termômetro comparável entre runs, não um valor
+   de exploitability literal em $). `run_offline_all_positions.py`
+   agora calcula isso uma vez no final de cada combinação e grava
+   `exploitability`/`best_response_by_seat` no `resultado_*.pkl`.
+   Validado em `test_exploitability_runs`: roda de ponta a ponta e
+   devolve um número finito por seat (não dá pra validar a DIREÇÃO do
+   valor sem treinar por muito mais tempo -- com poucas iterações a
+   média ainda reflete a exploração quase-aleatória do início do CFR).
 """
 
 import sys
@@ -127,7 +146,27 @@ def test_ante_reaches_terminals():
     print("  OK -- ante chega em ambos os terminais reais (nenhum ainda os ignora).\n")
 
 
+def test_exploitability_runs():
+    print("--- 3. compute_exploitability roda e devolve valores finitos por seat ---")
+    # OBS: não dá pra validar direção (ex: "forçar um seat a sempre foldar
+    # só pode ajudar quem responde") com poucas iterações de treino -- a
+    # média ainda reflete a exploração quase-aleatória do início do CFR,
+    # não uma estratégia perto do equilíbrio, então essa comparação daria
+    # ruído, não sinal. O que dá pra validar sem treinar por horas é que
+    # o cálculo roda de ponta a ponta e devolve um número por seat.
+    solver = build_solver(ante_pool=1.0)
+    solver.train(iterations=300, seed=42)
+    strat = solver.average_strategy()
+
+    br = solver.compute_exploitability(strat, iterations=80, seed=7)
+    print(f"  best response por seat (estratégia ainda mal treinada, só pra testar que roda): {br}")
+    assert len(br) == solver.n_seats
+    assert all(v == v for v in br.values()), "best response não pode dar NaN"  # v==v descarta NaN
+    print("  OK -- compute_exploitability roda sem erro pra todos os seats.\n")
+
+
 if __name__ == "__main__":
     test_dead_blind_credited()
     test_ante_reaches_terminals()
+    test_exploitability_runs()
     print("Todos os testes de multiway_rfi_fixes passaram.")
