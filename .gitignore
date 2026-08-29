@@ -2,3 +2,10 @@ __pycache__/
 *.pyc
 .venv/
 .env
+
+# Artefatos locais dos scripts run_offline_*.py -- gerados no PC de
+# quem roda (checkpoint/resultado por combinação, cache da matriz de
+# equity), nunca devem ir pro repo (por máquina, alguns pesados).
+checkpoint_*.pkl
+resultado_*.pkl
+data/

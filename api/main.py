@@ -107,6 +107,13 @@ class RfiJamJobRequest(BaseModel):
     # comportamento de sempre (open_size escalar).
     open_sizes: list[float] | None = None
     iterations: int = 2_500_000
+    # Ante de CADA jogador (bb) e quantos assentos pagam ante -- default
+    # 0.0/8 mantem o comportamento de sempre (spot sem sufixo _ante, ver
+    # jobs/solve_rfi_jam_batch.py). Passar ante_bb>0 gera o spot COM ante
+    # (ver engine/rfi_jam.py::ante_pool) sem nunca sobrescrever os spots
+    # sem ante ja em producao.
+    ante_bb: float = 0.0
+    table_size: int = 8
 
 
 @app.post("/jobs/rfi_jam")
@@ -138,6 +145,8 @@ def create_rfi_jam_job(req: RfiJamJobRequest, background_tasks: BackgroundTasks,
                 open_size=req.open_size,
                 open_sizes=req.open_sizes,
                 iterations=req.iterations,
+                ante_bb=req.ante_bb,
+                table_size=req.table_size,
             )
             client.table("solver_jobs").update({
                 "status": "done",
