@@ -54,13 +54,20 @@ class InfoSet:
 class MultiwayRfiSolver:
     def __init__(self, seat_names, seat_idx_in_table, seat_posts, table_stacks, payouts,
                  equity_matrix, classes, open_size=2.2, effective_stack=None,
-                 equity_cache=None):
+                 equity_cache=None, ante_pool=0.0):
         """
         seat_names: ['opener','MP','CO','BTN','SB','BB'] -- ordem de acao.
         seat_idx_in_table: indice de cada seat dentro de table_stacks/payouts.
         seat_posts: quanto cada seat ja tem investido antes de decidir
                     (0 pra nao-blind, 0.5 SB, 1.0 BB) -- seat_posts[0]
                     (abridor) normalmente 0, exceto se o abridor for SB.
+        ante_pool: soma de todos os antes da mesa (morta desde t=0,
+                   independente de quem folda depois) -- vai pro vencedor
+                   de qualquer terminal real da mao (nao entra em
+                   _icm_fold_root, que nao e um terminal de verdade: o
+                   abridor so decidiu nao abrir, a mao continua sem ser
+                   modelada, entao o ante ainda vai ser ganho por
+                   alguem fora do escopo deste solver).
         """
         self.seat_names = seat_names
         self.n_seats = len(seat_names)
@@ -80,6 +87,8 @@ class MultiwayRfiSolver:
         # infosets: um por seat por fase (fold/jam pre-jam; fold/call pos-jam)
         self.phase1 = [{c: InfoSet(2) for c in classes} for _ in range(self.n_seats)]
         self.phase2 = [{c: InfoSet(2) for c in classes} for _ in range(self.n_seats)]
+
+        self.ante_pool = ante_pool
 
         self._icm_cache = {}
         self._equity_cache = equity_cache if equity_cache is not None else {}
@@ -172,10 +181,10 @@ class MultiwayRfiSolver:
 
     def _terminal_all_fold(self, hands):
         """Todo mundo depois do abridor foldou -- abridor ganha os posts
-        de quem tinha blind (os outros nao perdem nada alem do que ja
-        haviam postado, que ja esta contado)."""
+        de quem tinha blind + o ante morto da mesa (os outros nao perdem
+        nada alem do que ja haviam postado, que ja esta contado)."""
         deltas = {}
-        total_won = 0.0
+        total_won = self.ante_pool
         for i in range(1, self.n_seats):
             p = self.seat_posts[i]
             if p > 0:
@@ -249,21 +258,25 @@ class MultiwayRfiSolver:
 
     def _showdown(self, live_set, hands):
         live = sorted(live_set)
+        # todo seat que nao esta vivo ja teve sua decisao resolvida como
+        # fold -- seja no PRE-jam (folda antes de alguem dar jam: perde
+        # o blind que tinha postado, se algum) ou no POS-jam (recebe o
+        # jam e folda: perde o post, ou o open R se for o abridor). Os
+        # dois casos tem que ser contados igual -- ANTES esse dinheiro
+        # so era contado quando o fold acontecia depois do jam; blind
+        # morto foldado antes do jam simplesmente sumia do pote.
+        not_live = [i for i in range(self.n_seats) if i not in live_set]
+
+        def cost(i):
+            return self.R if i == 0 else self.seat_posts[i]
+
+        dead = self.ante_pool + sum(cost(i) for i in not_live)
+
         if len(live) == 1:
-            # todos foldaram pro jam -- o unico vivo (o jammer) ganha
-            # os posts de quem foldou nessa fase + o open do abridor se
-            # o abridor nao for o jammer
-            deltas = {}
-            total_won = 0.0
-            for i in range(self.n_seats):
-                if i not in live_set:
-                    cost = self.R if i == 0 else self.seat_posts[i]
-                    # so conta se esse seat chegou a ter uma decisao de
-                    # fold/call (ou seja, nao foldou na fase 1 antes do jam)
-                    if i == 0 or i > min(live_set):
-                        deltas[i] = -cost
-                        total_won += cost
-            deltas[live[0]] = total_won
+            # todo mundo foldou pro jam (ou ja tinha foldado antes) --
+            # o unico vivo (o jammer) ganha tudo que ficou morto na mesa
+            deltas = {i: -cost(i) for i in not_live}
+            deltas[live[0]] = dead
             return self._icm(deltas)
 
         # multiway showdown entre os "live"
@@ -275,8 +288,8 @@ class MultiwayRfiSolver:
         # enumeramos boards, usamos a equity agregada por jogador)
         icm_by_winner = {}
         for winner in live:
-            deltas = {}
-            total_won = 0.0
+            deltas = {i: -cost(i) for i in not_live}
+            total_won = dead
             for i in live:
                 if i != winner:
                     deltas[i] = -self.T

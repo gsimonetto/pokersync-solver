@@ -101,6 +101,11 @@ def seats_for_opener(opener: str) -> list[str]:
     return ACTION_ORDER[i:bb_i + 1]  # [opener, ..., SB, BB]
 
 
+ANTE_BB = 0.125
+TABLE_SIZE = 8
+ANTE_POOL = ANTE_BB * TABLE_SIZE  # morto desde t=0, vai pro vencedor de qualquer terminal real
+
+
 def build_matchup_config(opener: str, stack: float) -> dict:
     seats = seats_for_opener(opener)
     n = len(seats)
@@ -119,6 +124,7 @@ def build_matchup_config(opener: str, stack: float) -> dict:
         "payouts": [500.0, 300.0, 200.0],
         "open_size": 2.2,
         "effective_stack": stack,
+        "ante_pool": ANTE_POOL,
     }
 
 
@@ -194,7 +200,12 @@ def main():
           f"Deixa rodando -- pode parar e retomar a qualquer momento.\n")
 
     for opener, stack in jobs:
-        label = f"{opener.replace('+', 'p')}_vs_BB_{int(stack)}bb"
+        # sufixo _ante0.125 -- alem do ante em si, esse script agora
+        # corrige um bug separado do motor multiway (blind morto foldado
+        # antes do jam sumia do pote), entao o nome do arquivo tambem
+        # precisa mudar pra nao reaproveitar checkpoint/resultado antigo
+        # (gerado com o motor com bug, mesmo sem ante).
+        label = f"{opener.replace('+', 'p')}_vs_BB_{int(stack)}bb_ante{ANTE_BB}"
         config = build_matchup_config(opener, stack)
         run_one(label, config, equity_matrix, classes)
 

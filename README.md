@@ -195,6 +195,46 @@ longo do tempo pra virar Net Expected Profit / EV ROI%).
   Monte Carlo) — pensado pra rodar OFFLINE, no seu PC, por
   horas/dias/semanas, não no meu sandbox. Ver
   `run_offline_multiway.py` (tem checkpoint automático).
+  - ✅ **2 bugs reais corrigidos em `engine/multiway_rfi.py`**
+    (2026-08, achados ao conferir ponto a ponto os arquivos
+    `resultado_CO_vs_BB_15bb.pkl`/`25bb.pkl` que o usuário rodou o
+    fim de semana inteiro — **os dois arquivos ficaram inválidos e
+    precisam ser regerados**, não é só questão de ante):
+    1. **Blind morto sumindo do pote** — quando um jogador com blind
+       (SB/BB) foldava ANTES de alguém dar jam, esse dinheiro nunca
+       era creditado a ninguém no showdown final: o branch de
+       showdown com 2+ jogadores vivos não considerava jogadores fora
+       do `live_set` de jeito nenhum, e o branch de 1 jogador vivo só
+       considerava uma parte (uma condição que excluía exatamente os
+       blinds foldados antes do jammer). É o mesmo sintoma do bug
+       original reportado no parser ("o pote não está indo pra
+       nenhum jogador"), só que dentro do solver — e independe de
+       ante: mesmo sem ante, o motor já dava resultado errado nesse
+       cenário. Corrigido unificando a contabilidade em `_showdown`:
+       todo seat fora do `live_set` credita seu custo (post, ou o
+       open size se for o abridor) ao vencedor, não importa se
+       foldou antes ou depois do jam.
+    2. **Ante** — mesmo bug que existia em `rfi_jam.py` antes do fix
+       de ante: este motor nunca modelava ante nenhum. Adicionado
+       `ante_pool` no `MultiwayRfiSolver` (mesma semântica do motor
+       heads-up: morto desde t=0, entra em `_terminal_all_fold` e em
+       `_showdown`). `run_offline_all_positions.py` agora passa
+       `ante_pool = ANTE_BB * TABLE_SIZE` (default 0,125bb × 8
+       assentos) pra todas as combinações, e os arquivos de saída
+       ganharam sufixo `_ante0.125` — não porque o valor do ante
+       importa pro nome, mas pra garantir que o script não reaproveite
+       silenciosamente um `checkpoint_*.pkl`/`resultado_*.pkl` antigo
+       (gerado com o motor com bug #1, mesmo sem ante).
+    Validado em `tests/multiway_rfi_fixes.py` (não dá pra fazer um
+    teste de convergência completo como o do heads-up aqui — motor
+    multiway é lento demais nesse sandbox pra caber em teste unitário
+    — então a validação é direta nos terminais, sem treinar o CFR
+    inteiro).
+    **Falta**: apagar `checkpoint_CO_vs_BB_*bb.pkl` e
+    `resultado_CO_vs_BB_15bb.pkl`/`25bb.pkl` (os que já rodaram sem os
+    fixes) e rodar `run_offline_all_positions.py` de novo do zero pra
+    essas combinações — o fix de blind morto muda o resultado mesmo
+    sem ante, então não tem como "só continuar" do checkpoint antigo.
 - ⏳ 3-bet "de verdade" (não all-in) pré-flop — não iniciado. A árvore
   de RFI atual trata qualquer resposta a um raise como shove (correto
   pra stack curto/médio, não serve pra stack profundo).
