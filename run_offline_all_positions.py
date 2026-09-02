@@ -83,6 +83,7 @@ posição específica primeiro.
 import pickle
 import sys
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -99,6 +100,11 @@ def seats_for_opener(opener: str) -> list[str]:
     i = ACTION_ORDER.index(opener)
     bb_i = ACTION_ORDER.index("BB")
     return ACTION_ORDER[i:bb_i + 1]  # [opener, ..., SB, BB]
+
+
+ANTE_BB = 0.125
+TABLE_SIZE = 8
+ANTE_POOL = ANTE_BB * TABLE_SIZE  # morto desde t=0, vai pro vencedor de qualquer terminal real
 
 
 def build_matchup_config(opener: str, stack: float) -> dict:
@@ -119,6 +125,7 @@ def build_matchup_config(opener: str, stack: float) -> dict:
         "payouts": [500.0, 300.0, 200.0],
         "open_size": 2.2,
         "effective_stack": stack,
+        "ante_pool": ANTE_POOL,
     }
 
 
@@ -175,18 +182,107 @@ def run_one(label: str, config: dict, equity_matrix, classes):
               f"({dt:.1f}s neste lote, ETA ~{eta_min:.0f}min)")
 
     strat = solver.average_strategy()
+    print(f"  [{label}] calculando exploitability (best response por seat, Monte Carlo)...")
+    br_by_seat = solver.compute_exploitability(strat)
+    exploitability = sum(br_by_seat.values())
     with open(result_path, "wb") as f:
-        pickle.dump({"config": config, "strategy": strat, "iterations": done_iterations}, f)
+        pickle.dump({
+            "config": config, "strategy": strat, "iterations": done_iterations,
+            "exploitability": exploitability, "best_response_by_seat": br_by_seat,
+        }, f)
     checkpoint_path.unlink(missing_ok=True)
-    print(f"[{label}] CONCLUÍDO -- salvo em {result_path}\n")
+    print(f"[{label}] CONCLUÍDO -- exploitability={exploitability:.3f} -- salvo em {result_path}\n")
+
+
+ENGINE_VERSION_MULTIWAY = "pokersync-solver-v0.1.0-multiway-ante"
+
+# Fila do mais rápido (menos seats) pro mais lento.
+POSITIONS_QUEUE = ["CO", "HJ", "MP", "UTG+1", "UTG"]
+STACKS = [15.0, 25.0, 40.0, 60.0]
+
+
+def label_for(opener: str, stack: float) -> str:
+    return f"{opener.replace('+', 'p')}_vs_BB_{int(stack)}bb_ante{ANTE_BB}"
+
+
+def build_drill_row(label: str, config: dict, strat: dict, exploitability: float) -> dict:
+    """Formato ainda mais simples que o do motor heads-up
+    (jobs/solve_rfi_jam_batch.py::build_drill_row): so' frequencia por
+    mao/seat/fase, sem EV nem gap por mao -- esse motor multiway nao tem
+    (ainda) um equivalente de compute_action_evs (isso exigiria EV exato
+    por classe de mao, que aqui so' da pra estimar por Monte Carlo, igual
+    o best_response_value). Documentado como limitacao conhecida no
+    README ate isso ser necessario de verdade (o frontend ainda nao
+    consome spot nenhum desse motor multiway)."""
+    seat_names = config["seat_names"]
+    pot = sum(p for p in config["seat_posts"] if p > 0) + config.get("ante_pool", 0.0)
+    # phase2 agora tem uma ficha de fold/call por seat POR jammer (quem deu
+    # o all-in e informacao publica, entao a resposta certa depende disso
+    # -- ver comentario em engine/multiway_rfi.py). Aqui isso vira um nivel
+    # a mais no gto_nodes, chaveado pelo nome do seat que jammou (mais legivel
+    # que o indice numerico usado internamente pelo motor).
+    gto_nodes = {
+        seat_names[i]: {
+            "phase1": {c: round(strat["phase1"][i][c], 4) for c in strat["phase1"][i]},
+            "phase2_vs_jam": {
+                seat_names[j]: {c: round(strat["phase2"][i][j][c], 4) for c in strat["phase2"][i][j]}
+                for j in strat["phase2"][i]
+            },
+        }
+        for i in range(len(seat_names))
+    }
+    opener = seat_names[0]
+    stack_bb = int(config["effective_stack"])
+    return {
+        "spot_id": f"rfi_multiway_{opener.lower()}_vs_bb_{stack_bb}bb_ante{ANTE_BB}",
+        "board": [],
+        "pot": pot,
+        "effective_stack": config["effective_stack"],
+        "gto_nodes": gto_nodes,
+        "solution": None,
+        "format": None,
+        "stack_bb": stack_bb,
+        "position": f"{opener}_vs_BB",
+        "street": "Preflop",
+        "action": "rfi_multiway",
+        "engine_version": ENGINE_VERSION_MULTIWAY,
+        "exploitability": round(exploitability, 3),
+        "solver_job_id": None,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+def upload_results():
+    from jobs.supabase_client import get_client
+
+    client = get_client()
+    rows = []
+    for opener in POSITIONS_QUEUE:
+        for stack in STACKS:
+            label = label_for(opener, stack)
+            result_path = Path(f"resultado_{label}.pkl")
+            if not result_path.exists():
+                print(f"[{label}] resultado_*.pkl ainda não existe -- pulando (rode sem --upload primeiro).")
+                continue
+            with open(result_path, "rb") as f:
+                data = pickle.load(f)
+            rows.append(build_drill_row(label, data["config"], data["strategy"], data["exploitability"]))
+
+    if not rows:
+        print("Nenhum resultado_*.pkl encontrado ainda -- nada pra subir.")
+        return
+
+    print(f"Subindo {len(rows)} spots pra tabela drills (spot_id com prefixo rfi_multiway_)...")
+    client.table("drills").insert(rows).execute()
+    print("OK -- upload concluído.")
 
 
 def main():
-    equity_matrix, classes = load_or_build_equity_matrix()
+    if "--upload" in sys.argv:
+        upload_results()
+        return
 
-    # Fila do mais rápido (menos seats) pro mais lento.
-    POSITIONS_QUEUE = ["CO", "HJ", "MP", "UTG+1", "UTG"]
-    STACKS = [15.0, 25.0, 40.0, 60.0]
+    equity_matrix, classes = load_or_build_equity_matrix()
 
     jobs = [(opener, stack) for opener in POSITIONS_QUEUE for stack in STACKS]
 
@@ -194,11 +290,16 @@ def main():
           f"Deixa rodando -- pode parar e retomar a qualquer momento.\n")
 
     for opener, stack in jobs:
-        label = f"{opener.replace('+', 'p')}_vs_BB_{int(stack)}bb"
+        # sufixo _ante0.125 -- alem do ante em si, esse script agora
+        # corrige um bug separado do motor multiway (blind morto foldado
+        # antes do jam sumia do pote), entao o nome do arquivo tambem
+        # precisa mudar pra nao reaproveitar checkpoint/resultado antigo
+        # (gerado com o motor com bug, mesmo sem ante).
+        label = label_for(opener, stack)
         config = build_matchup_config(opener, stack)
         run_one(label, config, equity_matrix, classes)
 
-    print("Fila inteira concluída! Todos os resultado_*.pkl estão prontos.")
+    print("Fila inteira concluída! Rode com --upload pra subir os spots pro Supabase.")
 
 
 if __name__ == "__main__":
