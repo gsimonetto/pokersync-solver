@@ -19,7 +19,6 @@ tão demorado. Sem isso de novo, nunca mais.
 
 import datetime
 import sys
-import uuid
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -27,7 +26,13 @@ from engine.pushfold_icm import PushFoldICMSolver  # noqa: E402
 from engine.hand_classes import combo_count  # noqa: E402
 from jobs.supabase_client import get_client  # noqa: E402
 
-ENGINE_VERSION = "pokersync-solver-v0.1.0-pushfold-icm"
+# v0.2.0: gto_nodes passou a carregar EV por classe (nao so' frequencia)
+# no MESMO formato que o RFI/Jam ja' usa (sb_open/bb_jam, cada um com
+# ev_fold + hands: {classe: [freq, ev, gap]}) -- o Treino reaproveita a
+# mesma tela/logica de veredito sem precisar de um formato novo so' pra
+# Push/Fold. spot_id tambem ficou DETERMINISTICO (sem sufixo aleatorio):
+# permite upsert (re-rodar o job atualiza o spot em vez de duplicar).
+ENGINE_VERSION = "pokersync-solver-v0.2.0-pushfold-icm"
 
 
 def compute_exploitability_estimate(solver: PushFoldICMSolver, strat: dict) -> float:
@@ -54,15 +59,34 @@ def compute_exploitability_estimate(solver: PushFoldICMSolver, strat: dict) -> f
 
 def build_drill_row(spot_id: str, solver: PushFoldICMSolver, strat: dict, exploitability: float,
                      job_id: str, stack_bb: float):
-    gto_nodes = {
-        "actions": ["fold", "push"],
-        "player": "sb",
-        "strategy": {c: [1 - strat["sb_push"][c], strat["sb_push"][c]] for c in solver.classes},
-        "bb_response": {
-            "actions": ["fold", "call"],
-            "strategy": {c: [1 - strat["bb_call"][c], strat["bb_call"][c]] for c in solver.classes},
+    evs = solver.final_evs(strat)
+
+    # Mesmo formato que RfiJamPhaseRaw (frontend, rfi-jam-service.ts):
+    # {ev_fold, action, hands: {classe: [freq, ev, gap]}}. sb_open aqui
+    # e' a decisao "empurrar ou foldar" do SB (acao "allin", nao "open"
+    # -- e' shove direto, sem meio-termo); bb_jam e' a decisao "pagar ou
+    # foldar" da BB depois do push. Sem sb_call_jam -- push/fold so' tem
+    # essas 2 decisoes (nao existe uma 3a fase "pagar o all-in", quem
+    # empurrou ja' esta' all-in por definicao).
+    gap = lambda ev, ev_fold: abs(ev - ev_fold)  # noqa: E731
+    sb_open = {
+        "ev_fold": evs["sb_ev_fold"],
+        "action": "allin",
+        "hands": {
+            c: [strat["sb_push"][c], evs["sb_ev_push"][c], gap(evs["sb_ev_push"][c], evs["sb_ev_fold"])]
+            for c in solver.classes
         },
     }
+    bb_jam = {
+        "ev_fold": evs["bb_ev_fold"],
+        "action": "call",
+        "hands": {
+            c: [strat["bb_call"][c], evs["bb_ev_call"][c], gap(evs["bb_ev_call"][c], evs["bb_ev_fold"])]
+            for c in solver.classes
+        },
+    }
+    gto_nodes = {"sb_open": sb_open, "bb_jam": bb_jam}
+
     return {
         "spot_id": spot_id,
         "board": [],  # push/fold pre-flop puro, sem board
@@ -74,7 +98,7 @@ def build_drill_row(spot_id: str, solver: PushFoldICMSolver, strat: dict, exploi
         "stack_bb": int(stack_bb),
         "position": "sb_vs_bb",
         "street": "Preflop",  # convencao real da tabela usa capitalizado (ex: 'Flop','Turn','River')
-        "action": "pushfold",  # NOVO tipo de acao -- nao existe equivalente aos valores atuais ('vs Open'); avaliar se faz sentido manter esse nome
+        "action": "pushfold",
         "engine_version": ENGINE_VERSION,
         "exploitability": exploitability,
         "solver_job_id": job_id,
@@ -102,7 +126,10 @@ def run_pushfold_batch(job_id: str, stacks_bb: list[float], table_context: dict,
         strat = solver.average_strategy()
         exploitability = compute_exploitability_estimate(solver, strat)
 
-        spot_id = f"pushfold_icm_{int(stack)}bb_sb_vs_bb_{uuid.uuid4().hex[:8]}"
+        # Deterministico (sem sufixo aleatorio) -- re-rodar o mesmo stack
+        # atualiza a linha via upsert em vez de criar uma duplicata nova
+        # (mesmo bug de idempotencia ja' corrigido no RFI/Jam, decisao 011).
+        spot_id = f"pushfold_icm_sb_vs_bb_{int(stack)}bb"
         row = build_drill_row(spot_id, solver, strat, exploitability, job_id, stack_bb=stack)
         results.append(row)
 
@@ -112,7 +139,7 @@ def run_pushfold_batch(job_id: str, stacks_bb: list[float], table_context: dict,
             "updated_at": datetime.datetime.utcnow().isoformat(),
         }).eq("id", job_id).execute()
 
-    # upload em lote no final (poderia ser incremental tambem, se preferir
-    # ver os spots aparecendo um a um no Supabase durante o job)
-    client.table("drills").insert(results).execute()
+    # upsert por spot_id (nao insert) -- re-rodar o job sobrescreve o
+    # spot existente em vez de duplicar.
+    client.table("drills").upsert(results, on_conflict="spot_id").execute()
     return results
