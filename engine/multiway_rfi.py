@@ -188,7 +188,11 @@ class MultiwayRfiSolver:
         strat = infoset.current_strategy()
 
         icm_fold = self._icm_fold_root(hands)
-        icm_open = self._play_fold_or_jam(1, hands)
+        # strat[1] = probabilidade do CO abrir com essa mao -- e' a
+        # "reach probability" do proprio CO pra chegar em qualquer decisao
+        # de fase 2 dele mais adiante (ver comentario em _resolve_responders
+        # sobre por que isso importa).
+        icm_open = self._play_fold_or_jam(1, hands, opener_reach=strat[1])
 
         node_val = {}
         all_seats = set(icm_fold.keys()) | set(icm_open.keys())
@@ -218,7 +222,7 @@ class MultiwayRfiSolver:
         deltas[0] = total_won
         return self._icm(deltas)
 
-    def _play_fold_or_jam(self, seat_i, hands):
+    def _play_fold_or_jam(self, seat_i, hands, opener_reach):
         """Decisao de cada seat DEPOIS do abridor (seat_i >= 1): fold
         ou jam (all-in), quando a acao chega nele (todos antes dele
         ja foldaram, por construcao -- essa funcao so e chamada na
@@ -229,8 +233,8 @@ class MultiwayRfiSolver:
         infoset = self.phase1[seat_i][hands[seat_i]]
         strat = infoset.current_strategy()
 
-        icm_fold = self._play_fold_or_jam(seat_i + 1, hands)
-        icm_jam = self._play_phase2(jammer=seat_i, hands=hands)
+        icm_fold = self._play_fold_or_jam(seat_i + 1, hands, opener_reach)
+        icm_jam = self._play_phase2(jammer=seat_i, hands=hands, opener_reach=opener_reach)
 
         node_val = {}
         all_seats = set(icm_fold.keys()) | set(icm_jam.keys())
@@ -246,7 +250,7 @@ class MultiwayRfiSolver:
 
         return node_val
 
-    def _play_phase2(self, jammer, hands):
+    def _play_phase2(self, jammer, hands, opener_reach):
         """Todos os seats DEPOIS do jammer que ainda nao agiram, em
         ordem, decidem fold/call; no final o abridor (seat 0, que
         sempre abriu -- nunca chega aqui tendo foldado, isso ja e
@@ -254,9 +258,9 @@ class MultiwayRfiSolver:
         responders = [i for i in range(self.n_seats) if i > jammer]
         responders.append(0)  # abridor sempre responde (sempre abriu antes)
 
-        return self._resolve_responders(jammer, responders, 0, {jammer}, hands)
+        return self._resolve_responders(jammer, responders, 0, {jammer}, hands, opener_reach)
 
-    def _resolve_responders(self, jammer, responders, idx, live_set, hands):
+    def _resolve_responders(self, jammer, responders, idx, live_set, hands, opener_reach):
         if idx >= len(responders):
             return self._showdown(live_set, hands)
 
@@ -264,8 +268,8 @@ class MultiwayRfiSolver:
         infoset = self.phase2[seat_i][jammer][hands[seat_i]]
         strat = infoset.current_strategy()
 
-        icm_fold = self._resolve_responders(jammer, responders, idx + 1, live_set, hands)
-        icm_call = self._resolve_responders(jammer, responders, idx + 1, live_set | {seat_i}, hands)
+        icm_fold = self._resolve_responders(jammer, responders, idx + 1, live_set, hands, opener_reach)
+        icm_call = self._resolve_responders(jammer, responders, idx + 1, live_set | {seat_i}, hands, opener_reach)
 
         node_val = {}
         all_seats = set(icm_fold.keys()) | set(icm_call.keys())
@@ -276,8 +280,21 @@ class MultiwayRfiSolver:
                   icm_call.get(seat_i, 0.0) - node_val.get(seat_i, 0.0)]
         infoset.regret_sum[0] += regret[0]
         infoset.regret_sum[1] += regret[1]
-        infoset.strategy_sum[0] += strat[0]
-        infoset.strategy_sum[1] += strat[1]
+        # A media de estrategia (strategy_sum) do CFR precisa ser pesada
+        # pela probabilidade do PROPRIO jogador ter chegado ate essa ficha
+        # (formula padrao de "average strategy" do CFR: soma de
+        # pi_i(I) * sigma(I,a), nao soma direta de sigma(I,a)). Pra todo
+        # mundo aqui isso e' sempre 1 (cada seat so' toma UMA decisao
+        # propria por mao jogada) -- EXCETO o abridor (seat 0), que toma
+        # duas decisoes em sequencia na mesma mao: abre/folda na fase 1 e,
+        # se alguem der jam depois, paga/folda na fase 2. Sem esse peso,
+        # a fase 2 do abridor conta com peso total mesmo em maos que ele
+        # dificilmente abriria -- e' o que estava inflando a
+        # exploitability do CO bem acima dos outros seats, mesmo depois
+        # de separar a decisao por jammer.
+        weight = opener_reach if seat_i == 0 else 1.0
+        infoset.strategy_sum[0] += weight * strat[0]
+        infoset.strategy_sum[1] += weight * strat[1]
 
         return node_val
 
