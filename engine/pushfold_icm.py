@@ -153,6 +153,48 @@ class PushFoldICMSolver:
             "bb_call": {c: bb_avg[i, 1] for i, c in enumerate(self.classes)},
         }
 
+    def final_evs(self, strat=None):
+        """
+        EV ($ ICM) de cada decisao, POR CLASSE de mao, usando a
+        ESTRATEGIA MEDIA final (a mesma de average_strategy()) -- nao a
+        estrategia da ULTIMA iteracao isolada, que train() usa
+        internamente pra regret-matching e e' sempre mais ruidosa.
+        Mesmo calculo que já roda dentro de train() a cada iteracao,
+        so' que rodado UMA vez a mais no final com a media convergida.
+
+        Existe pra dar ao Push/Fold o mesmo dado que o RFI/Jam ja'
+        expõe (EV por classe, nao so' frequencia) -- sem isso não dava
+        pra mostrar "quanto você perdeu" no Treino pra esses spots, so'
+        pra RFI/Jam.
+        """
+        if strat is None:
+            strat = self.average_strategy()
+
+        sb_call_icm = (self.equity * self.icm_sb_call_sbwins +
+                       (1 - self.equity) * self.icm_sb_call_bbwins)
+        bb_call_icm = (self.equity * self.icm_bb_call_sbwins +
+                       (1 - self.equity) * self.icm_bb_call_bbwins)
+
+        bb_call_prob = np.array([strat["bb_call"][c] for c in self.classes])
+        ev_push_sb = (self.weights_norm[np.newaxis, :] *
+                      (sb_call_icm * bb_call_prob[np.newaxis, :] +
+                       self.icm_sb_push_bbfold * (1 - bb_call_prob)[np.newaxis, :])).sum(axis=1)
+
+        sb_push_prob = np.array([strat["sb_push"][c] for c in self.classes])
+        reach_sb = self.weights_norm * sb_push_prob
+        reach_sum = reach_sb.sum()
+        if reach_sum > 0:
+            ev_call_bb = (reach_sb[:, np.newaxis] * bb_call_icm).sum(axis=0) / reach_sum
+        else:
+            ev_call_bb = np.full(self.n, self.icm_bb_fold)
+
+        return {
+            "sb_ev_fold": float(self.icm_sb_fold),
+            "sb_ev_push": {c: float(ev_push_sb[i]) for i, c in enumerate(self.classes)},
+            "bb_ev_fold": float(self.icm_bb_push_bbfold),
+            "bb_ev_call": {c: float(ev_call_bb[i]) for i, c in enumerate(self.classes)},
+        }
+
 
 if __name__ == "__main__":
     from engine.pushfold import PushFoldSolver
