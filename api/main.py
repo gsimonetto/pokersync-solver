@@ -18,6 +18,12 @@ Endpoints:
                                direto, ver engine/hand_cev.py). Não grava
                                nada no Supabase — o produto decide o que
                                fazer com o resultado.
+  POST /hands/compute_cev_multiway -> mesma ideia, mas pra all-in com 3+
+                               jogadores e as mãos de TODOS conhecidas
+                               (ver engine/hand_cev_multiway.py) —
+                               síncrono, ~1-2s (roda ICM a cada iteração
+                               de Monte Carlo, mais pesado que o
+                               heads-up). Também não grava nada.
 
 Autenticação: header `X-API-Key`, comparado contra SOLVER_API_KEY.
 """
@@ -35,6 +41,7 @@ from jobs.solve_pushfold_batch import run_pushfold_batch
 from jobs.solve_rfi_jam_batch import run_rfi_jam_batch
 from engine.equity_final import build_final_equity_matrix
 from engine.hand_cev import compute_hand_cev, HandCevError
+from engine.hand_cev_multiway import compute_hand_cev_multiway, HandCevMultiwayError
 
 app = FastAPI(title="PokerSync Solver API", version="0.1.0")
 
@@ -190,6 +197,31 @@ def compute_cev(req: HandCevRequest, x_api_key: Optional[str] = Header(default=N
             iterations=req.iterations,
         )
     except HandCevError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+
+
+class HandCevMultiwayRequest(BaseModel):
+    combos: list[str]  # ex ["AhAd", "KsKc", "QdQc"] -- cartas de CADA jogador all-in, mostradas no showdown
+    stacks_before: list[float]  # mesma ordem de `combos`
+    hero_idx: int  # posicao do heroi dentro de combos/stacks_before
+    other_stacks: list[float] = []
+    payouts: list[float]
+    iterations: int = 1500
+
+
+@app.post("/hands/compute_cev_multiway")
+def compute_cev_multiway(req: HandCevMultiwayRequest, x_api_key: Optional[str] = Header(default=None)):
+    check_api_key(x_api_key)
+    try:
+        return compute_hand_cev_multiway(
+            combos=req.combos,
+            stacks_before=req.stacks_before,
+            other_stacks=req.other_stacks,
+            hero_idx=req.hero_idx,
+            payouts=req.payouts,
+            iterations=req.iterations,
+        )
+    except HandCevMultiwayError as e:
         raise HTTPException(status_code=422, detail=str(e))
 
 

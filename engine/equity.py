@@ -35,7 +35,13 @@ def hand_vs_hand_equity(combo_a: str, combo_b: str, iterations=2000, seed=None) 
     wins = 0.0
     for _ in range(iterations):
         deck = Deck()
-        deck.cards = [c for c in deck.cards if c not in used]
+        # sorted() antes do shuffle: Deck() do treys usa um Random() PRÓPRIO
+        # (nao ligado ao random.seed() global) só pra embaralhar a ordem
+        # inicial -- sem ordenar antes, o shuffle abaixo (que usa o `random`
+        # global, o único que o parâmetro `seed` desta função controla)
+        # parte de uma ordem diferente a cada chamada, e o resultado final
+        # não é reprodutível mesmo passando o mesmo `seed` duas vezes.
+        deck.cards = sorted(c for c in deck.cards if c not in used)
         random.shuffle(deck.cards)
         board = deck.cards[:5]
         score_a = EVALUATOR.evaluate(board, card_a)
