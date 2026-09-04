@@ -304,4 +304,11 @@ if __name__ == "__main__":
     print(f"Best-response value para P1 (contra P2 fixo): {br0:.5f}")
     print(f"Best-response value para P2 (contra P1 fixo): {br1:.5f}")
     print(f"Exploitability total (soma dos dois, deve -> 0):    {exploitability:.5f}")
-    print(f"Exploitability em mbb/hand (padrao industria):       {exploitability * 1000 / 2:.3f}")
+    exploit_mbb = exploitability * 1000 / 2
+    print(f"Exploitability em mbb/hand (padrao industria):       {exploit_mbb:.3f}")
+
+    # Tolerancia generosa (valor de referencia observado: ~1.24 mbb/hand)
+    # -- so' falha se o treino parar de convergir de verdade.
+    ok = exploit_mbb < 5.0
+    print("OK" if ok else "FALHOU: exploitability acima do esperado, CFR pode ter regredido")
+    sys.exit(0 if ok else 1)

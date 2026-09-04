@@ -1,0 +1,30 @@
+name: Testes do motor
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Instala dependências
+        run: pip install -r requirements.txt
+
+      - name: Núcleo do CFR (Kuhn Poker, exploitability conhecida)
+        run: python tests/kuhn_poker.py
+
+      - name: Pós-flop river (MDF exata + exploitability rigorosa)
+        run: python tests/postflop_river.py
+
+      - name: Pós-flop river — exploitability
+        run: python tests/postflop_exploitability.py
+
+      - name: RFI/Jam multi-tamanho (regressão contra motor legado)
+        run: python tests/rfi_jam_multisize.py

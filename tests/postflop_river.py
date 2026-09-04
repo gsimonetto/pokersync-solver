@@ -86,3 +86,4 @@ if __name__ == "__main__":
     print("\n=== Resumo ===")
     all_ok = closed_form_ok and mixed_ok and mdf_ok and value_bets_a_lot and bluff_is_mixed_or_bets
     print("TODOS OS TESTES PASSARAM" if all_ok else "PELO MENOS UM TESTE FALHOU -- revisar")
+    sys.exit(0 if all_ok else 1)
