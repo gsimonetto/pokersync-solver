@@ -54,13 +54,20 @@ class InfoSet:
 class MultiwayRfiSolver:
     def __init__(self, seat_names, seat_idx_in_table, seat_posts, table_stacks, payouts,
                  equity_matrix, classes, open_size=2.2, effective_stack=None,
-                 equity_cache=None):
+                 equity_cache=None, ante_pool=0.0):
         """
         seat_names: ['opener','MP','CO','BTN','SB','BB'] -- ordem de acao.
         seat_idx_in_table: indice de cada seat dentro de table_stacks/payouts.
         seat_posts: quanto cada seat ja tem investido antes de decidir
                     (0 pra nao-blind, 0.5 SB, 1.0 BB) -- seat_posts[0]
                     (abridor) normalmente 0, exceto se o abridor for SB.
+        ante_pool: soma de todos os antes da mesa (morta desde t=0,
+                   independente de quem folda depois) -- vai pro vencedor
+                   de qualquer terminal real da mao (nao entra em
+                   _icm_fold_root, que nao e um terminal de verdade: o
+                   abridor so decidiu nao abrir, a mao continua sem ser
+                   modelada, entao o ante ainda vai ser ganho por
+                   alguem fora do escopo deste solver).
         """
         self.seat_names = seat_names
         self.n_seats = len(seat_names)
@@ -77,12 +84,39 @@ class MultiwayRfiSolver:
         self.R = open_size
         self.T = effective_stack or min(table_stacks[i] for i in seat_idx_in_table)
 
-        # infosets: um por seat por fase (fold/jam pre-jam; fold/call pos-jam)
+        # infosets: um por seat por fase (fold/jam pre-jam; fold/call pos-jam).
+        # phase2 tem uma dimensao a mais que phase1: quem deu o jam e
+        # informacao PUBLICA (todo mundo na mesa ve quem foi all-in), entao
+        # a decisao de fold/call de um seat depois de um jam precisa ser uma
+        # ficha (infoset) SEPARADA pra cada jammer possivel -- responder a um
+        # jam do BB (que entrou mais barato) nao e a mesma decisao que
+        # responder a um jam do BTN. Compartilhar uma unica ficha pras duas
+        # situacoes (como era antes) faz o seat aprender uma frequencia
+        # media que nao e otima pra nenhuma das duas -- e o motivo do CO
+        # (que sempre responde, seja qual for o jammer) ficar com
+        # exploitability muito maior que os outros seats.
         self.phase1 = [{c: InfoSet(2) for c in classes} for _ in range(self.n_seats)]
-        self.phase2 = [{c: InfoSet(2) for c in classes} for _ in range(self.n_seats)]
+        self.phase2 = [
+            {j: {c: InfoSet(2) for c in classes} for j in self._possible_jammers(seat_i)}
+            for seat_i in range(self.n_seats)
+        ]
+
+        self.ante_pool = ante_pool
 
         self._icm_cache = {}
         self._equity_cache = equity_cache if equity_cache is not None else {}
+
+    def _possible_jammers(self, seat_i):
+        """Quais seats podem ser o jammer que faz `seat_i` responder em
+        fase 2. So' seats 1..n-1 podem dar jam (seat 0 e' o abridor, que so
+        decide fold/open). O abridor (seat 0) responde a QUALQUER jammer
+        (ele sempre abriu antes). Qualquer outro seat so' responde a um
+        jammer que agiu ANTES dele na ordem (jammer < seat_i) -- depois
+        disso, se `seat_i` ainda nao tiver agido, e' ele quem decide
+        fold/jam em fase 1, nao um responder de fase 2."""
+        if seat_i == 0:
+            return list(range(1, self.n_seats))
+        return list(range(1, seat_i))
 
     def _icm(self, stack_deltas: dict):
         """stack_deltas: {seat_idx: delta}. Retorna dict {seat_idx: $ICM}."""
@@ -154,7 +188,11 @@ class MultiwayRfiSolver:
         strat = infoset.current_strategy()
 
         icm_fold = self._icm_fold_root(hands)
-        icm_open = self._play_fold_or_jam(1, hands)
+        # strat[1] = probabilidade do CO abrir com essa mao -- e' a
+        # "reach probability" do proprio CO pra chegar em qualquer decisao
+        # de fase 2 dele mais adiante (ver comentario em _resolve_responders
+        # sobre por que isso importa).
+        icm_open = self._play_fold_or_jam(1, hands, opener_reach=strat[1])
 
         node_val = {}
         all_seats = set(icm_fold.keys()) | set(icm_open.keys())
@@ -172,10 +210,10 @@ class MultiwayRfiSolver:
 
     def _terminal_all_fold(self, hands):
         """Todo mundo depois do abridor foldou -- abridor ganha os posts
-        de quem tinha blind (os outros nao perdem nada alem do que ja
-        haviam postado, que ja esta contado)."""
+        de quem tinha blind + o ante morto da mesa (os outros nao perdem
+        nada alem do que ja haviam postado, que ja esta contado)."""
         deltas = {}
-        total_won = 0.0
+        total_won = self.ante_pool
         for i in range(1, self.n_seats):
             p = self.seat_posts[i]
             if p > 0:
@@ -184,7 +222,7 @@ class MultiwayRfiSolver:
         deltas[0] = total_won
         return self._icm(deltas)
 
-    def _play_fold_or_jam(self, seat_i, hands):
+    def _play_fold_or_jam(self, seat_i, hands, opener_reach):
         """Decisao de cada seat DEPOIS do abridor (seat_i >= 1): fold
         ou jam (all-in), quando a acao chega nele (todos antes dele
         ja foldaram, por construcao -- essa funcao so e chamada na
@@ -195,8 +233,8 @@ class MultiwayRfiSolver:
         infoset = self.phase1[seat_i][hands[seat_i]]
         strat = infoset.current_strategy()
 
-        icm_fold = self._play_fold_or_jam(seat_i + 1, hands)
-        icm_jam = self._play_phase2(jammer=seat_i, hands=hands)
+        icm_fold = self._play_fold_or_jam(seat_i + 1, hands, opener_reach)
+        icm_jam = self._play_phase2(jammer=seat_i, hands=hands, opener_reach=opener_reach)
 
         node_val = {}
         all_seats = set(icm_fold.keys()) | set(icm_jam.keys())
@@ -212,7 +250,7 @@ class MultiwayRfiSolver:
 
         return node_val
 
-    def _play_phase2(self, jammer, hands):
+    def _play_phase2(self, jammer, hands, opener_reach):
         """Todos os seats DEPOIS do jammer que ainda nao agiram, em
         ordem, decidem fold/call; no final o abridor (seat 0, que
         sempre abriu -- nunca chega aqui tendo foldado, isso ja e
@@ -220,18 +258,18 @@ class MultiwayRfiSolver:
         responders = [i for i in range(self.n_seats) if i > jammer]
         responders.append(0)  # abridor sempre responde (sempre abriu antes)
 
-        return self._resolve_responders(jammer, responders, 0, {jammer}, hands)
+        return self._resolve_responders(jammer, responders, 0, {jammer}, hands, opener_reach)
 
-    def _resolve_responders(self, jammer, responders, idx, live_set, hands):
+    def _resolve_responders(self, jammer, responders, idx, live_set, hands, opener_reach):
         if idx >= len(responders):
             return self._showdown(live_set, hands)
 
         seat_i = responders[idx]
-        infoset = self.phase2[seat_i][hands[seat_i]]
+        infoset = self.phase2[seat_i][jammer][hands[seat_i]]
         strat = infoset.current_strategy()
 
-        icm_fold = self._resolve_responders(jammer, responders, idx + 1, live_set, hands)
-        icm_call = self._resolve_responders(jammer, responders, idx + 1, live_set | {seat_i}, hands)
+        icm_fold = self._resolve_responders(jammer, responders, idx + 1, live_set, hands, opener_reach)
+        icm_call = self._resolve_responders(jammer, responders, idx + 1, live_set | {seat_i}, hands, opener_reach)
 
         node_val = {}
         all_seats = set(icm_fold.keys()) | set(icm_call.keys())
@@ -242,28 +280,45 @@ class MultiwayRfiSolver:
                   icm_call.get(seat_i, 0.0) - node_val.get(seat_i, 0.0)]
         infoset.regret_sum[0] += regret[0]
         infoset.regret_sum[1] += regret[1]
-        infoset.strategy_sum[0] += strat[0]
-        infoset.strategy_sum[1] += strat[1]
+        # A media de estrategia (strategy_sum) do CFR precisa ser pesada
+        # pela probabilidade do PROPRIO jogador ter chegado ate essa ficha
+        # (formula padrao de "average strategy" do CFR: soma de
+        # pi_i(I) * sigma(I,a), nao soma direta de sigma(I,a)). Pra todo
+        # mundo aqui isso e' sempre 1 (cada seat so' toma UMA decisao
+        # propria por mao jogada) -- EXCETO o abridor (seat 0), que toma
+        # duas decisoes em sequencia na mesma mao: abre/folda na fase 1 e,
+        # se alguem der jam depois, paga/folda na fase 2. Sem esse peso,
+        # a fase 2 do abridor conta com peso total mesmo em maos que ele
+        # dificilmente abriria -- e' o que estava inflando a
+        # exploitability do CO bem acima dos outros seats, mesmo depois
+        # de separar a decisao por jammer.
+        weight = opener_reach if seat_i == 0 else 1.0
+        infoset.strategy_sum[0] += weight * strat[0]
+        infoset.strategy_sum[1] += weight * strat[1]
 
         return node_val
 
     def _showdown(self, live_set, hands):
         live = sorted(live_set)
+        # todo seat que nao esta vivo ja teve sua decisao resolvida como
+        # fold -- seja no PRE-jam (folda antes de alguem dar jam: perde
+        # o blind que tinha postado, se algum) ou no POS-jam (recebe o
+        # jam e folda: perde o post, ou o open R se for o abridor). Os
+        # dois casos tem que ser contados igual -- ANTES esse dinheiro
+        # so era contado quando o fold acontecia depois do jam; blind
+        # morto foldado antes do jam simplesmente sumia do pote.
+        not_live = [i for i in range(self.n_seats) if i not in live_set]
+
+        def cost(i):
+            return self.R if i == 0 else self.seat_posts[i]
+
+        dead = self.ante_pool + sum(cost(i) for i in not_live)
+
         if len(live) == 1:
-            # todos foldaram pro jam -- o unico vivo (o jammer) ganha
-            # os posts de quem foldou nessa fase + o open do abridor se
-            # o abridor nao for o jammer
-            deltas = {}
-            total_won = 0.0
-            for i in range(self.n_seats):
-                if i not in live_set:
-                    cost = self.R if i == 0 else self.seat_posts[i]
-                    # so conta se esse seat chegou a ter uma decisao de
-                    # fold/call (ou seja, nao foldou na fase 1 antes do jam)
-                    if i == 0 or i > min(live_set):
-                        deltas[i] = -cost
-                        total_won += cost
-            deltas[live[0]] = total_won
+            # todo mundo foldou pro jam (ou ja tinha foldado antes) --
+            # o unico vivo (o jammer) ganha tudo que ficou morto na mesa
+            deltas = {i: -cost(i) for i in not_live}
+            deltas[live[0]] = dead
             return self._icm(deltas)
 
         # multiway showdown entre os "live"
@@ -275,8 +330,8 @@ class MultiwayRfiSolver:
         # enumeramos boards, usamos a equity agregada por jogador)
         icm_by_winner = {}
         for winner in live:
-            deltas = {}
-            total_won = 0.0
+            deltas = {i: -cost(i) for i in not_live}
+            total_won = dead
             for i in live:
                 if i != winner:
                     deltas[i] = -self.T
@@ -299,8 +354,88 @@ class MultiwayRfiSolver:
                 {c: self.phase1[i][c].average_strategy()[1] for c in self.classes}
                 for i in range(self.n_seats)
             ],
+            # phase2 agora tem uma camada extra: pra cada seat, uma
+            # estrategia de fold/call DIFERENTE por jammer (ver comentario
+            # em __init__ sobre por que "quem deu o jam" precisa ser parte
+            # da ficha de decisao).
             "phase2": [
-                {c: self.phase2[i][c].average_strategy()[1] for c in self.classes}
+                {
+                    j: {c: self.phase2[i][j][c].average_strategy()[1] for c in self.classes}
+                    for j in self.phase2[i]
+                }
                 for i in range(self.n_seats)
             ],
         }
+
+    @staticmethod
+    def _blend(icm_a, icm_b, weight_a, weight_b):
+        all_seats = set(icm_a.keys()) | set(icm_b.keys())
+        return {s: weight_a * icm_a.get(s, 0.0) + weight_b * icm_b.get(s, 0.0) for s in all_seats}
+
+    def best_response_value(self, br_seat, avg_strategy=None, iterations=1000, seed=123):
+        """Estima (via Monte Carlo) o quanto `br_seat` ganharia se jogasse
+        SEMPRE a ação ótima (maior ICM) em cada decisão dele, enquanto
+        todos os outros seats seguem `avg_strategy` (a média já
+        convergida). Diferente do motor heads-up (`rfi_jam.py`), aqui não
+        dá pra enumerar todas as combinações de mão exatamente -- com 4+
+        seats isso explode (169^4 combinações só pra 4 jogadores) -- por
+        isso a amostragem, igual já é feita no treino (`train`) e na
+        equity multiway (`_multiway_eq`)."""
+        if avg_strategy is None:
+            avg_strategy = self.average_strategy()
+        random.seed(seed)
+        classes_list = self.classes
+        weights_list = [self.weights_norm[c] for c in classes_list]
+        total = 0.0
+        for _ in range(iterations):
+            hands = {i: random.choices(classes_list, weights=weights_list, k=1)[0]
+                      for i in range(self.n_seats)}
+            icm = self._br_open_or_fold(br_seat, avg_strategy, hands)
+            total += icm.get(br_seat, 0.0)
+        return total / iterations
+
+    def compute_exploitability(self, avg_strategy=None, iterations=1000, seed=123):
+        """Best response de cada seat, um de cada vez (mesma convenção do
+        motor heads-up: soma das best responses, não uma diferença contra
+        o valor sob a média -- serve como termômetro de convergência
+        comparável entre runs, não como exploitability literal em $)."""
+        if avg_strategy is None:
+            avg_strategy = self.average_strategy()
+        return {
+            i: self.best_response_value(i, avg_strategy, iterations=iterations, seed=seed)
+            for i in range(self.n_seats)
+        }
+
+    def _br_open_or_fold(self, br_seat, avg, hands):
+        icm_fold = self._icm_fold_root(hands)
+        icm_open = self._br_fold_or_jam(1, br_seat, avg, hands)
+        if br_seat == 0:
+            return icm_open if icm_open.get(0, 0.0) > icm_fold.get(0, 0.0) else icm_fold
+        p_open = avg["phase1"][0][hands[0]]
+        return self._blend(icm_fold, icm_open, 1 - p_open, p_open)
+
+    def _br_fold_or_jam(self, seat_i, br_seat, avg, hands):
+        if seat_i >= self.n_seats:
+            return self._terminal_all_fold(hands)
+        icm_fold = self._br_fold_or_jam(seat_i + 1, br_seat, avg, hands)
+        icm_jam = self._br_phase2(seat_i, br_seat, avg, hands)
+        if seat_i == br_seat:
+            return icm_jam if icm_jam.get(seat_i, 0.0) > icm_fold.get(seat_i, 0.0) else icm_fold
+        p_jam = avg["phase1"][seat_i][hands[seat_i]]
+        return self._blend(icm_fold, icm_jam, 1 - p_jam, p_jam)
+
+    def _br_phase2(self, jammer, br_seat, avg, hands):
+        responders = [i for i in range(self.n_seats) if i > jammer]
+        responders.append(0)
+        return self._br_resolve_responders(jammer, responders, 0, {jammer}, br_seat, avg, hands)
+
+    def _br_resolve_responders(self, jammer, responders, idx, live_set, br_seat, avg, hands):
+        if idx >= len(responders):
+            return self._showdown(live_set, hands)
+        seat_i = responders[idx]
+        icm_fold = self._br_resolve_responders(jammer, responders, idx + 1, live_set, br_seat, avg, hands)
+        icm_call = self._br_resolve_responders(jammer, responders, idx + 1, live_set | {seat_i}, br_seat, avg, hands)
+        if seat_i == br_seat:
+            return icm_call if icm_call.get(seat_i, 0.0) > icm_fold.get(seat_i, 0.0) else icm_fold
+        p_call = avg["phase2"][seat_i][jammer][hands[seat_i]]
+        return self._blend(icm_fold, icm_call, 1 - p_call, p_call)
