@@ -119,7 +119,19 @@ class MultiwayRfiSolver:
         return list(range(1, seat_i))
 
     def _icm(self, stack_deltas: dict):
-        """stack_deltas: {seat_idx: delta}. Retorna dict {seat_idx: $ICM}."""
+        """stack_deltas: {seat_idx: delta}. Retorna dict {seat_idx: $ICM}
+        com uma entrada pra CADA um dos n_seats -- inclusive quem nao
+        aparece em stack_deltas (stack nao mudou, ex: fold sem blind
+        pago). Antes so' devolvia entrada pra quem estava em
+        stack_deltas; quem ficava de fora virava CHAVE AUSENTE no dict,
+        e todo consumidor usa .get(seat, 0.0) -- ou seja, o equity real
+        desse seat (que nao e' zero, e' o ICM normal da mao dele) virava
+        SILENCIOSAMENTE zero em qualquer calculo posterior. Isso afetava
+        principalmente seats sem blind (BTN aqui) quando todo mundo
+        folda: o codigo passava a achar que a mao de "fold" desses seats
+        valia 0, em vez do ICM real (~130+ nesse spot) -- e' o que
+        estava inflando MUITO a frequencia de jam deles no treino (fold
+        parecia inutil) e destruindo o calculo de exploitability."""
         key = tuple(sorted(stack_deltas.items()))
         if key in self._icm_cache:
             return self._icm_cache[key]
@@ -128,7 +140,7 @@ class MultiwayRfiSolver:
             table_i = self.seat_idx_in_table[seat]
             stacks[table_i] = max(0.0, stacks[table_i] + delta)
         eq = icm_equity(stacks, self.payouts)
-        result = {seat: eq[self.seat_idx_in_table[seat]] for seat in stack_deltas}
+        result = {seat: eq[self.seat_idx_in_table[seat]] for seat in range(self.n_seats)}
         self._icm_cache[key] = result
         return result
 
