@@ -37,6 +37,20 @@ class InfoSet:
         self.regret_sum = [0.0] * n_actions
         self.strategy_sum = [0.0] * n_actions
 
+    def update_regret(self, regret):
+        """CFR+: o arrependimento acumulado eh sempre travado em >= 0 logo
+        apos cada atualizacao (nao so' na hora de montar a estrategia
+        atual). A versao anterior (CFR classico) deixava regret_sum
+        acumular livremente negativo -- se uma acao tomasse um "azar"
+        grande de amostragem no comeco do treino, o placar dela podia
+        ficar tao negativo que ela quase nunca mais era escolhida, e
+        levava MUITAS iteracoes pra se recuperar (as vezes nem 5 milhoes
+        bastavam). Travar em zero a cada passo faz a acao voltar a
+        competir assim que tiver uma unica iteracao positiva, em vez de
+        precisar "pagar a divida" acumulada primeiro."""
+        for i in range(self.n_actions):
+            self.regret_sum[i] = max(0.0, self.regret_sum[i] + regret[i])
+
     def current_strategy(self):
         positive = [max(r, 0.0) for r in self.regret_sum]
         total = sum(positive)
@@ -213,8 +227,7 @@ class MultiwayRfiSolver:
 
         regret = [icm_fold.get(0, 0.0) - node_val.get(0, 0.0),
                   icm_open.get(0, 0.0) - node_val.get(0, 0.0)]
-        infoset.regret_sum[0] += regret[0]
-        infoset.regret_sum[1] += regret[1]
+        infoset.update_regret(regret)
         infoset.strategy_sum[0] += strat[0]
         infoset.strategy_sum[1] += strat[1]
 
@@ -255,8 +268,7 @@ class MultiwayRfiSolver:
 
         regret = [icm_fold.get(seat_i, 0.0) - node_val.get(seat_i, 0.0),
                   icm_jam.get(seat_i, 0.0) - node_val.get(seat_i, 0.0)]
-        infoset.regret_sum[0] += regret[0]
-        infoset.regret_sum[1] += regret[1]
+        infoset.update_regret(regret)
         infoset.strategy_sum[0] += strat[0]
         infoset.strategy_sum[1] += strat[1]
 
@@ -290,8 +302,7 @@ class MultiwayRfiSolver:
 
         regret = [icm_fold.get(seat_i, 0.0) - node_val.get(seat_i, 0.0),
                   icm_call.get(seat_i, 0.0) - node_val.get(seat_i, 0.0)]
-        infoset.regret_sum[0] += regret[0]
-        infoset.regret_sum[1] += regret[1]
+        infoset.update_regret(regret)
         # A media de estrategia (strategy_sum) do CFR precisa ser pesada
         # pela probabilidade do PROPRIO jogador ter chegado ate essa ficha
         # (formula padrao de "average strategy" do CFR: soma de
@@ -417,6 +428,58 @@ class MultiwayRfiSolver:
             i: self.best_response_value(i, avg_strategy, iterations=iterations, seed=seed)
             for i in range(self.n_seats)
         }
+
+    def check_opener_convergence(self, avg_strategy=None, sample_hands=None,
+                                  iterations=25, gap_threshold=0.3, seed=99):
+        """Checagem de sanidade OBRIGATORIA antes de considerar um resultado
+        pronto pra uso (ver CLAUDE.md) -- vai alem de conferir maos extremas
+        e estrutura: para cada mao da amostra, calcula o valor REAL de abrir
+        vs desistir (via best-response, com os outros seats jogando a
+        media ja treinada) e compara com a frequencia que o abridor (seat
+        0) realmente aprendeu.
+
+        Isso pega especificamente o problema de "mao travada" do CFR
+        classico -- uma mao que teve azar de amostragem cedo no treino e
+        nunca mais se recuperou, mesmo com milhoes de iteracoes (jah visto
+        em producao: A5s, A2s, KQs, QJs apareceram quase sempre foldando
+        quando abrir claramente valia mais). O CFR+ (regret com piso em
+        zero, ver InfoSet.update_regret) deixa isso bem mais raro, mas essa
+        checagem continua sendo o jeito de CONFIRMAR que nao aconteceu de
+        novo num resultado especifico -- nao e' opcional.
+
+        Retorna lista de dicts {hand, gap, trained_freq} para as maos onde
+        a direcao do treino diverge do valor real (gap > gap_threshold e
+        o treino faz o oposto)."""
+        if avg_strategy is None:
+            avg_strategy = self.average_strategy()
+        if sample_hands is None:
+            sample_hands = self.classes  # todas as 169 por padrao
+
+        classes_list = self.classes
+        weights_list = [self.weights_norm[c] for c in classes_list]
+
+        def value_of(hand, force_open, n, s):
+            random.seed(s)
+            total = 0.0
+            for _ in range(n):
+                hands = {0: hand}
+                for i in range(1, self.n_seats):
+                    hands[i] = random.choices(classes_list, weights=weights_list, k=1)[0]
+                icm_fold = self._icm_fold_root(hands)
+                icm_open = self._br_fold_or_jam(1, 0, avg_strategy, hands)
+                total += (icm_open if force_open else icm_fold).get(0, 0.0)
+            return total / n
+
+        flags = []
+        for hand in sample_hands:
+            v_fold = value_of(hand, False, iterations, seed)
+            v_open = value_of(hand, True, iterations, seed)
+            gap = v_open - v_fold
+            trained = avg_strategy["phase1"][0][hand]
+            wrong = (gap > gap_threshold and trained < 0.5) or (gap < -gap_threshold and trained > 0.5)
+            if wrong:
+                flags.append({"hand": hand, "gap": gap, "trained_freq": trained})
+        return flags
 
     def _br_open_or_fold(self, br_seat, avg, hands):
         icm_fold = self._icm_fold_root(hands)
