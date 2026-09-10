@@ -9,11 +9,13 @@
 # Uso:
 #   ./scripts/trigger_job.sh pushfold [stacks...]
 #   ./scripts/trigger_job.sh rfi_jam <matchup> [stacks...]
+#   ./scripts/trigger_job.sh postflop_river             # spot ilustrativo padrao (ver jobs/solve_postflop_batch.py)
 #
 # Exemplos:
 #   ./scripts/trigger_job.sh pushfold                  # usa 10 20 30 50 (padrao)
 #   ./scripts/trigger_job.sh pushfold 15 25 40 60       # stacks customizados
 #   ./scripts/trigger_job.sh rfi_jam sb_vs_bb 15 25 40 60
+#   ./scripts/trigger_job.sh postflop_river
 #
 # Depois de disparar, o script fica perguntando o status a cada 5s ate'
 # o job terminar (done/error) -- nao precisa ficar voltando no /docs pra
@@ -82,8 +84,19 @@ EOF
 )
     ENDPOINT="/jobs/rfi_jam"
     ;;
+  postflop_river)
+    # Sem parametros hoje -- dispara o spot ilustrativo padrao
+    # (DEFAULT_CBET_RIVER_SPOT em jobs/solve_postflop_batch.py). Pra
+    # rodar outro spot, chame a rota direto com o board/ranges desejados
+    # (ver README).
+    BODY=$(cat <<'EOF'
+{"spots": [{"label": "cbet_river_dry_board", "board": "Ah Kd 7s 2c 9h", "range_oop": {"AA": 1.0, "KK": 1.0, "AKs": 1.0, "AKo": 1.0, "T9s": 0.5, "87s": 0.5}, "range_ip": {"QQ": 1.0, "JJ": 1.0, "TT": 1.0, "99": 1.0}, "pot": 20.0, "stack_oop": 40.0, "stack_ip": 40.0, "bet_sizes": [0.33, 0.75, 1.5]}], "iterations": 30000}
+EOF
+)
+    ENDPOINT="/jobs/postflop_river"
+    ;;
   *)
-    echo "Tipo de job desconhecido: $JOB_TYPE (use 'pushfold' ou 'rfi_jam')" >&2
+    echo "Tipo de job desconhecido: $JOB_TYPE (use 'pushfold', 'rfi_jam' ou 'postflop_river')" >&2
     exit 1
     ;;
 esac
