@@ -9,6 +9,10 @@ Endpoints:
   POST /jobs/rfi_jam       -> dispara um job de geração de spots RFI/jam
                                (matchups já validados, ver MATCHUPS em
                                jobs/solve_rfi_jam_batch.py)
+  POST /jobs/postflop_river -> dispara um job de geração de spots de
+                               c-bet no river (só river -- é o único
+                               estágio pós-flop com exploitability
+                               validada, ver jobs/solve_postflop_batch.py)
   GET  /jobs/{job_id}      -> consulta status (tambem pode ser lido direto
                                do Supabase pela tabela `solver_jobs`, esse
                                endpoint existe só por conveniência/uniformidade)
@@ -39,6 +43,7 @@ from pydantic import BaseModel
 from jobs.supabase_client import get_client
 from jobs.solve_pushfold_batch import run_pushfold_batch
 from jobs.solve_rfi_jam_batch import run_rfi_jam_batch
+from jobs.solve_postflop_batch import run_postflop_river_batch
 from engine.equity_final import build_final_equity_matrix
 from engine.hand_cev import compute_hand_cev, HandCevError
 from engine.hand_cev_multiway import compute_hand_cev_multiway, HandCevMultiwayError
@@ -144,6 +149,59 @@ def create_rfi_jam_job(req: RfiJamJobRequest, background_tasks: BackgroundTasks,
                 classes=classes,
                 open_size=req.open_size,
                 open_sizes=req.open_sizes,
+                iterations=req.iterations,
+            )
+            client.table("solver_jobs").update({
+                "status": "done",
+                "updated_at": datetime.datetime.utcnow().isoformat(),
+            }).eq("id", job_id).execute()
+        except Exception as e:  # noqa: BLE001
+            client.table("solver_jobs").update({
+                "status": "error",
+                "error": str(e),
+                "updated_at": datetime.datetime.utcnow().isoformat(),
+            }).eq("id", job_id).execute()
+
+    background_tasks.add_task(_run)
+    return {"job_id": job_id, "status": "running"}
+
+
+class PostflopRiverSpot(BaseModel):
+    label: str
+    board: str  # ex "Ah Kd 7s 2c 9h" -- sempre 5 cartas (river), ver docstring do job
+    range_oop: dict[str, float]
+    range_ip: dict[str, float]
+    pot: float
+    stack_oop: float
+    stack_ip: float
+    bet_sizes: list[float] = [0.33, 0.75, 1.5]
+
+
+class PostflopRiverJobRequest(BaseModel):
+    spots: list[PostflopRiverSpot]
+    iterations: int = 30_000
+
+
+@app.post("/jobs/postflop_river")
+def create_postflop_river_job(req: PostflopRiverJobRequest, background_tasks: BackgroundTasks,
+                               x_api_key: Optional[str] = Header(default=None)):
+    check_api_key(x_api_key)
+
+    job_id = str(uuid.uuid4())
+    client = get_client()
+    client.table("solver_jobs").insert({
+        "id": job_id,
+        "job_type": "postflop_river_batch",
+        "status": "running",
+        "params": req.model_dump(),
+        "created_at": datetime.datetime.utcnow().isoformat(),
+    }).execute()
+
+    def _run():
+        try:
+            run_postflop_river_batch(
+                job_id=job_id,
+                spots=[s.model_dump() for s in req.spots],
                 iterations=req.iterations,
             )
             client.table("solver_jobs").update({
