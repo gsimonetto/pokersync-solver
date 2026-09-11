@@ -22,6 +22,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from engine.pushfold import PushFoldSolver  # noqa: E402
 from engine.pushfold_icm import PushFoldICMSolver  # noqa: E402
 from engine.hand_classes import combo_count  # noqa: E402
 from jobs.supabase_client import get_client  # noqa: E402
@@ -57,8 +58,8 @@ def compute_exploitability_estimate(solver: PushFoldICMSolver, strat: dict) -> f
     return total_gap
 
 
-def build_drill_row(spot_id: str, solver: PushFoldICMSolver, strat: dict, exploitability: float,
-                     job_id: str, stack_bb: float):
+def build_drill_row(spot_id: str, solver, strat: dict, exploitability: float,
+                     job_id: str, stack_bb: float, use_icm: bool):
     evs = solver.final_evs(strat)
 
     # Mesmo formato que RfiJamPhaseRaw (frontend, rfi-jam-service.ts):
@@ -85,7 +86,7 @@ def build_drill_row(spot_id: str, solver: PushFoldICMSolver, strat: dict, exploi
             for c in solver.classes
         },
     }
-    gto_nodes = {"sb_open": sb_open, "bb_jam": bb_jam}
+    gto_nodes = {"ev_mode": "icm" if use_icm else "chipev", "sb_open": sb_open, "bb_jam": bb_jam}
 
     return {
         "spot_id": spot_id,
@@ -106,22 +107,31 @@ def build_drill_row(spot_id: str, solver: PushFoldICMSolver, strat: dict, exploi
     }
 
 
-def run_pushfold_batch(job_id: str, stacks_bb: list[float], table_context: dict, payouts: list[float],
-                        equity_matrix, classes, iterations=2000):
+def run_pushfold_batch(job_id: str, stacks_bb: list[float], table_context: dict,
+                        payouts: list[float] | None, equity_matrix, classes, iterations=2000,
+                        use_icm: bool = True):
     """
     table_context: dict com 'other_stacks' (lista de stacks dos demais
     jogadores da mesa, em bb) -- usado igual pra todos os stacks de SB/BB
     testados nesse batch (assume mesa fixa; ajustar se precisar variar).
+
+    `use_icm=False` gera em chipEV puro (engine/pushfold.py::PushFoldSolver)
+    em vez de $ICM (engine/pushfold_icm.py::PushFoldICMSolver) -- `payouts`
+    fica opcional/ignorado nesse caso. Spot_id ganha sufixo "_chipev",
+    nunca mexe no spot ICM já em produção pro mesmo stack.
     """
     client = get_client()
     results = []
 
     for stack in stacks_bb:
         table_stacks = [stack, stack] + table_context["other_stacks"]
-        solver = PushFoldICMSolver(
-            sb_idx=0, bb_idx=1, table_stacks=table_stacks, payouts=payouts,
-            equity_matrix=equity_matrix, classes=classes,
-        )
+        if use_icm:
+            solver = PushFoldICMSolver(
+                sb_idx=0, bb_idx=1, table_stacks=table_stacks, payouts=payouts,
+                equity_matrix=equity_matrix, classes=classes,
+            )
+        else:
+            solver = PushFoldSolver(stack_bb=stack, equity_matrix=equity_matrix, classes=classes)
         solver.train(iterations=iterations)
         strat = solver.average_strategy()
         exploitability = compute_exploitability_estimate(solver, strat)
@@ -129,8 +139,9 @@ def run_pushfold_batch(job_id: str, stacks_bb: list[float], table_context: dict,
         # Deterministico (sem sufixo aleatorio) -- re-rodar o mesmo stack
         # atualiza a linha via upsert em vez de criar uma duplicata nova
         # (mesmo bug de idempotencia ja' corrigido no RFI/Jam, decisao 011).
-        spot_id = f"pushfold_icm_sb_vs_bb_{int(stack)}bb"
-        row = build_drill_row(spot_id, solver, strat, exploitability, job_id, stack_bb=stack)
+        suffix = "" if use_icm else "_chipev"
+        spot_id = f"pushfold_icm_sb_vs_bb_{int(stack)}bb{suffix}"
+        row = build_drill_row(spot_id, solver, strat, exploitability, job_id, stack_bb=stack, use_icm=use_icm)
         results.append(row)
 
         # atualiza status do job incrementalmente (visivel via GET /jobs/{id})

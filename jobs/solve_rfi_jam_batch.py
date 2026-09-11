@@ -1,9 +1,24 @@
 """
-Job de geração em lote pra spots RFI/jam (com ICM). Gera o formato
-COMPACTO de verdade usado em produção: cada mão vira [freq, ev, gap]
-em vez de um objeto, pra caber num JSON razoável (~16KB por spot em
-vez de ~74KB) -- ev_fold fica uma vez só por fase, não repetido por
-mão.
+Job de geração em lote pra spots RFI/jam. Gera o formato COMPACTO de
+verdade usado em produção: cada mão vira [freq, ev, gap] em vez de um
+objeto, pra caber num JSON razoável (~16KB por spot em vez de ~74KB)
+-- ev_fold fica uma vez só por fase, não repetido por mão.
+
+Dois modos de EV (parâmetro `use_icm`, ver engine/rfi_jam.py):
+  - use_icm=True (padrão, preserva todo spot já em produção): $ICM --
+    considera a estrutura de premiação do torneio (perder fichas perto
+    da bolha dói mais que no meio do torneio).
+  - use_icm=False: chipEV puro -- maximiza fichas esperadas, ignora
+    premiação (cash game, ou torneio bem no início, longe de bolha).
+    Não precisa de `payouts`. Gera um spot SEPARADO (spot_id com
+    sufixo "_chipev"), nunca sobrescreve o spot ICM do mesmo
+    matchup/stack -- os dois formatos ficam lado a lado no banco, o
+    produto escolhe qual ler. `gto_nodes["ev_mode"]` marca qual é
+    qual sem precisar inspecionar o spot_id.
+
+MATCHUPS já validados e testados end-to-end (ver README):
+  sb_vs_bb:  opener_post=0.5, defender_post=1.0, dead_money=0.0
+  btn_vs_bb: opener_post=0.0, defender_post=1.0, dead_money=0.5
 
 MATCHUPS já validados e testados end-to-end (ver README):
   sb_vs_bb:  opener_post=0.5, defender_post=1.0, dead_money=0.0
@@ -60,6 +75,7 @@ def build_drill_row(spot_id: str, matchup: str, solver: RfiJamSolver, strat: dic
 
     first_class = solver.classes[0]
     gto_nodes = {
+        "ev_mode": "icm" if solver.use_icm else "chipev",
         "sb_open": _compact_phase(phase_hands("sb_open", "open"), "open", evs["sb_open"][first_class]["fold"]),
         "bb_jam": _compact_phase(phase_hands("bb_jam", "jam"), "allin", evs["bb_jam"][first_class]["fold"]),
         "sb_call_jam": _compact_phase(phase_hands("sb_call_jam", "call"), "call", evs["sb_call_jam"][first_class]["fold"]),
@@ -132,6 +148,7 @@ def build_drill_row_multisize(spot_id: str, matchup: str, solver: RfiJamSolver, 
 
     gto_nodes = {
         "sizes": sizes,
+        "ev_mode": "icm" if solver.use_icm else "chipev",
         "sb_open": phase("sb_open", "open", "open"),
         "bb_jam": phase("bb_jam", "jam", "allin"),
         "sb_call_jam": phase("sb_call_jam", "call", "call"),
@@ -157,9 +174,9 @@ def build_drill_row_multisize(spot_id: str, matchup: str, solver: RfiJamSolver, 
 
 
 def run_rfi_jam_batch(job_id: str | None, matchups: list[str], stacks_bb: list[float],
-                       other_stacks: list[float], payouts: list[float], equity_matrix, classes,
+                       other_stacks: list[float], payouts: list[float] | None, equity_matrix, classes,
                        open_size=2.2, open_sizes: list[float] | None = None,
-                       iterations=2_500_000, dry_run=False):
+                       iterations=2_500_000, dry_run=False, use_icm: bool = True):
     """
     Roda o batch completo (matchups x stacks) e sobe pro Supabase --
     a menos que dry_run=True, aí só retorna as rows sem inserir (útil
@@ -171,6 +188,11 @@ def run_rfi_jam_batch(job_id: str | None, matchups: list[str], stacks_bb: list[f
     nem substituir os spots de 1 tamanho já validados/em produção.
     Sem `open_sizes`, comportamento idêntico a antes (`open_size`
     escalar, formato antigo) -- nenhuma mudança pro que já existe.
+
+    `use_icm=False` gera em chipEV puro em vez de $ICM (ver
+    engine/rfi_jam.py) -- `payouts` fica opcional/ignorado nesse caso.
+    Grava numa linha SEPARADA (spot_id com sufixo "_chipev"), nunca
+    mexe no spot ICM já em produção pro mesmo matchup/stack.
     """
     client = None if dry_run else get_client()
     results = []
@@ -188,18 +210,19 @@ def run_rfi_jam_batch(job_id: str | None, matchups: list[str], stacks_bb: list[f
                 equity_matrix=equity_matrix, classes=classes,
                 open_size=open_size, open_sizes=open_sizes,
                 effective_stack=stack, opener_post=opener_post, defender_post=defender_post,
-                dead_money=dead_money,
+                dead_money=dead_money, use_icm=use_icm,
             )
             solver.train(iterations=iterations)
             strat = solver.average_strategy()
             evs = solver.compute_action_evs(strat)
             br_sb, br_bb = solver.compute_exploitability(strat)
 
+            suffix = "" if use_icm else "_chipev"
             if multisize:
-                spot_id = f"rfi_jam_{matchup}_{int(stack)}bb_msize"
+                spot_id = f"rfi_jam_{matchup}_{int(stack)}bb{suffix}_msize"
                 row = build_drill_row_multisize(spot_id, matchup, solver, strat, evs, br_sb + br_bb, job_id, stack)
             else:
-                spot_id = f"rfi_jam_{matchup}_{int(stack)}bb"
+                spot_id = f"rfi_jam_{matchup}_{int(stack)}bb{suffix}"
                 row = build_drill_row(spot_id, matchup, solver, strat, evs, br_sb + br_bb, job_id, stack)
             results.append(row)
 

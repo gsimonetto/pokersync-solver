@@ -41,8 +41,14 @@ jobs:
       - name: RFI/Jam multi-tamanho (regressão contra motor legado)
         run: python tests/rfi_jam_multisize.py
 
+      - name: RFI/Jam — modo chipEV puro (vs ICM, Push/Fold incluso)
+        run: python tests/rfi_jam_chipev.py
+
       - name: RFI multiway — regressão contra motor heads-up (lockstep) + sanidade
         run: python tests/multiway_rfi.py
+
+      - name: RFI multiway — modo chipEV puro (vs ICM sob pressão de bolha)
+        run: python tests/multiway_rfi_chipev.py
 
       - name: RFI multiway — prova do vazamento em compute_exploitability + medição exata (2 seats)
         run: python tests/multiway_exploitability_2seat.py

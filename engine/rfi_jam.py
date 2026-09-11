@@ -102,11 +102,14 @@ class RfiJamSolver:
     def __init__(self, sb_idx, bb_idx, table_stacks, payouts, equity_matrix, classes,
                  open_size=2.2, open_sizes: Sequence[float] | None = None,
                  effective_stack=None, opener_post=0.5, defender_post=1.0,
-                 dead_money=0.0):
+                 dead_money=0.0, use_icm: bool = True):
         self.sb_idx = sb_idx  # "opener" (nome mantido por compatibilidade)
         self.bb_idx = bb_idx  # "defender"
         self.table_stacks = list(table_stacks)
         self.payouts = payouts
+        self.use_icm = use_icm
+        if use_icm and not payouts:
+            raise ValueError("payouts vazio/None -- sem payouts nao ha ICM pra calcular (use_icm=False pra chipEV puro)")
         self.equity_matrix = equity_matrix
         self.classes = classes
         self.weights = {c: combo_count(c) for c in classes}
@@ -142,6 +145,16 @@ class RfiJamSolver:
         return stacks
 
     def _icm_pair(self, sb_delta, bb_delta):
+        """Retorna a UTILIDADE de cada jogador nesse terminal -- em $ICM
+        (padrao, use_icm=True) ou em fichas cruas (use_icm=False, "chipEV
+        puro": maximiza fichas esperadas, ignora estrutura de premiacao
+        -- o modo certo pra cash game, ou torneio bem no inicio, longe de
+        qualquer bolha). Unico ponto de acesso a ICM no motor -- TODO
+        terminal da arvore passa por aqui, entao esse if e' suficiente
+        pra propagar o modo pra treino, best-response e compute_action_evs
+        sem duplicar nada da logica da arvore."""
+        if not self.use_icm:
+            return sb_delta, bb_delta
         stacks = self._stacks_after(sb_delta, bb_delta)
         eq = icm_equity(stacks, self.payouts)
         return eq[self.sb_idx], eq[self.bb_idx]

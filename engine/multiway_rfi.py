@@ -54,7 +54,7 @@ class InfoSet:
 class MultiwayRfiSolver:
     def __init__(self, seat_names, seat_idx_in_table, seat_posts, table_stacks, payouts,
                  equity_matrix, classes, open_size=2.2, effective_stack=None,
-                 equity_cache=None, ante_pool=0.0):
+                 equity_cache=None, ante_pool=0.0, use_icm: bool = True):
         """
         seat_names: ['opener','MP','CO','BTN','SB','BB'] -- ordem de acao.
         seat_idx_in_table: indice de cada seat dentro de table_stacks/payouts.
@@ -75,6 +75,9 @@ class MultiwayRfiSolver:
         self.seat_posts = seat_posts
         self.table_stacks = list(table_stacks)
         self.payouts = payouts
+        self.use_icm = use_icm
+        if use_icm and not payouts:
+            raise ValueError("payouts vazio/None -- sem payouts nao ha ICM pra calcular (use_icm=False pra chipEV puro)")
         self.equity_matrix = equity_matrix  # pairwise, usado só pra referência/compat
         self.classes = classes
         self.weights = {c: combo_count(c) for c in classes}
@@ -120,7 +123,14 @@ class MultiwayRfiSolver:
         return list(range(1, seat_i))
 
     def _icm(self, stack_deltas: dict):
-        """stack_deltas: {seat_idx: delta}. Retorna dict {seat_idx: $ICM}."""
+        """stack_deltas: {seat_idx: delta}. Retorna a UTILIDADE de cada
+        seat nesse terminal -- em $ICM (padrao) ou em fichas cruas
+        (use_icm=False, "chipEV puro" -- mesmo espirito de
+        RfiJamSolver._icm_pair, unico ponto de acesso a ICM no motor
+        multiway). Nome do metodo mantido (nao "_utility") pra nao
+        quebrar nenhum chamador existente."""
+        if not self.use_icm:
+            return dict(stack_deltas)
         key = tuple(sorted(stack_deltas.items()))
         if key in self._icm_cache:
             return self._icm_cache[key]
