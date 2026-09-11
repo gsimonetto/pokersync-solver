@@ -60,14 +60,24 @@ def check_api_key(x_api_key: Optional[str] = Header(default=None)):
 class PushFoldJobRequest(BaseModel):
     stacks_bb: list[float]
     other_stacks: list[float]
-    payouts: list[float]
+    # Obrigatorio so' quando use_icm=True (padrao) -- em chipEV puro
+    # (use_icm=False) nao entra na conta, pode mandar [].
+    payouts: list[float] = []
     iterations: int = 2000
+    # True (padrao, preserva todo spot ja em producao): $ICM -- considera
+    # a estrutura de premiacao do torneio. False: chipEV puro (cash game,
+    # ou torneio bem no inicio, longe de bolha) -- payouts fica ignorado.
+    # Grava um spot SEPARADO (sufixo "_chipev" no spot_id), nunca mexe no
+    # spot ICM existente pro mesmo stack.
+    use_icm: bool = True
 
 
 @app.post("/jobs/pushfold")
 def create_pushfold_job(req: PushFoldJobRequest, background_tasks: BackgroundTasks,
                          x_api_key: Optional[str] = Header(default=None)):
     check_api_key(x_api_key)
+    if req.use_icm and not req.payouts:
+        raise HTTPException(status_code=422, detail="payouts vazio -- obrigatorio quando use_icm=True (ou mande use_icm=false pra chipEV puro)")
 
     job_id = str(uuid.uuid4())
     client = get_client()
@@ -90,6 +100,7 @@ def create_pushfold_job(req: PushFoldJobRequest, background_tasks: BackgroundTas
                 equity_matrix=equity_matrix,
                 classes=classes,
                 iterations=req.iterations,
+                use_icm=req.use_icm,
             )
             client.table("solver_jobs").update({
                 "status": "done",
@@ -110,7 +121,9 @@ class RfiJamJobRequest(BaseModel):
     matchups: list[str]
     stacks_bb: list[float]
     other_stacks: list[float]
-    payouts: list[float]
+    # Obrigatorio so' quando use_icm=True (padrao) -- em chipEV puro
+    # (use_icm=False) nao entra na conta, pode mandar [].
+    payouts: list[float] = []
     open_size: float = 2.2
     # Lista de tamanhos (ex [2.0, 2.5, 3.0]) -- quando informada com 2+
     # itens, gera o spot no formato multi-tamanho (grava numa linha
@@ -119,12 +132,20 @@ class RfiJamJobRequest(BaseModel):
     # comportamento de sempre (open_size escalar).
     open_sizes: list[float] | None = None
     iterations: int = 2_500_000
+    # True (padrao, preserva todo spot ja em producao): $ICM -- considera
+    # a estrutura de premiacao do torneio. False: chipEV puro (cash game,
+    # ou torneio bem no inicio, longe de bolha) -- payouts fica ignorado.
+    # Grava um spot SEPARADO (sufixo "_chipev" no spot_id), nunca mexe no
+    # spot ICM existente pro mesmo matchup/stack.
+    use_icm: bool = True
 
 
 @app.post("/jobs/rfi_jam")
 def create_rfi_jam_job(req: RfiJamJobRequest, background_tasks: BackgroundTasks,
                         x_api_key: Optional[str] = Header(default=None)):
     check_api_key(x_api_key)
+    if req.use_icm and not req.payouts:
+        raise HTTPException(status_code=422, detail="payouts vazio -- obrigatorio quando use_icm=True (ou mande use_icm=false pra chipEV puro)")
 
     job_id = str(uuid.uuid4())
     client = get_client()
@@ -150,6 +171,7 @@ def create_rfi_jam_job(req: RfiJamJobRequest, background_tasks: BackgroundTasks,
                 open_size=req.open_size,
                 open_sizes=req.open_sizes,
                 iterations=req.iterations,
+                use_icm=req.use_icm,
             )
             client.table("solver_jobs").update({
                 "status": "done",

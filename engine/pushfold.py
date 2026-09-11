@@ -116,6 +116,46 @@ class PushFoldSolver:
             "bb_call": {c: bb_avg[i, 1] for i, c in enumerate(self.classes)},
         }
 
+    @property
+    def effective_stack(self):
+        """Alias de stack_bb -- mesmo nome de atributo que
+        PushFoldICMSolver usa, pra jobs/solve_pushfold_batch.py poder
+        tratar os dois motores (chipEV e ICM) de forma uniforme."""
+        return self.stack_bb
+
+    def final_evs(self, strat=None):
+        """EV (em fichas, chipEV puro) de cada decisao por classe de mao,
+        usando a estrategia media final -- mesmo espirito e mesma formula
+        de PushFoldICMSolver.final_evs(), so' que sem ICM (utilidade =
+        fichas cruas em vez de $ICM). Existe pra dar ao job o mesmo
+        formato [freq, ev, gap] em ambos os modos (ver
+        jobs/solve_pushfold_batch.py)."""
+        if strat is None:
+            strat = self.average_strategy()
+
+        chip_ev_call = self.stack_bb * (2 * self.equity - 1)  # [sb_class][bb_class]
+
+        bb_call_prob = np.array([strat["bb_call"][c] for c in self.classes])
+        ev_push_sb = (self.weights_norm[np.newaxis, :] *
+                      (chip_ev_call * bb_call_prob[np.newaxis, :] +
+                       1.0 * (1 - bb_call_prob)[np.newaxis, :])).sum(axis=1)
+
+        sb_push_prob = np.array([strat["sb_push"][c] for c in self.classes])
+        reach_sb = self.weights_norm * sb_push_prob
+        reach_sum = reach_sb.sum()
+        chip_ev_call_bb = -chip_ev_call
+        if reach_sum > 0:
+            ev_call_bb = (reach_sb[:, np.newaxis] * chip_ev_call_bb).sum(axis=0) / reach_sum
+        else:
+            ev_call_bb = np.zeros(self.n)
+
+        return {
+            "sb_ev_fold": -0.5,
+            "sb_ev_push": {c: float(ev_push_sb[i]) for i, c in enumerate(self.classes)},
+            "bb_ev_fold": -1.0,
+            "bb_ev_call": {c: float(ev_call_bb[i]) for i, c in enumerate(self.classes)},
+        }
+
 
 if __name__ == "__main__":
     print("Construindo matriz de equity 169x169 (uma vez, reaproveitada em todos os stacks)...")

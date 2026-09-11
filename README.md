@@ -214,6 +214,31 @@ longo do tempo pra virar Net Expected Profit / EV ROI%).
   de 2026-09, precisa refazer do zero** (apague `checkpoint_*.pkl`,
   `resultado_*.pkl` e `data/equity_matrix_cache.pkl`) — o treino usava
   a lógica com o bug de reach probability acima.
+- ✅ **chipEV puro (sem ICM)** — RFI/jam (`RfiJamSolver(use_icm=False)`),
+  multiway (`MultiwayRfiSolver(use_icm=False)`) e Push/Fold
+  (`engine/pushfold.py::PushFoldSolver`, motor separado, já existia)
+  agora suportam os dois modos: `use_icm=True` (padrão, preserva todo
+  spot já em produção) considera a estrutura de premiação do torneio;
+  `use_icm=False` ignora premiação e maximiza fichas esperadas puras
+  — o modo certo pra cash game, ou torneio bem no início, longe de
+  qualquer bolha. `payouts` fica opcional/ignorado em chipEV. Em
+  RFI/jam e multiway, o "interruptor" é um único ponto de acesso a ICM
+  no motor inteiro (`_icm_pair`/`_icm`) — quando desligado, devolve o
+  delta de fichas cru em vez de rodar Malmuth-Harville, sem duplicar
+  nenhuma lógica de árvore. Validado por propriedade matemática: no
+  caso degenerado (torneio 1x1, "quem ganha leva tudo"), os dois modos
+  batem EXATAMENTE (ganhar fichas é proporcional a ganhar dinheiro,
+  não tem bolha nem 2º lugar pra complicar a conta) — ver
+  `tests/rfi_jam_chipev.py`. Sob pressão real de bolha (multiway,
+  `tests/multiway_rfi_chipev.py`), os dois modos divergem de verdade
+  (confirma que o interruptor tem efeito, não é um no-op). Jobs
+  (`jobs/solve_rfi_jam_batch.py`, `jobs/solve_pushfold_batch.py`) e a
+  API (`POST /jobs/rfi_jam`, `POST /jobs/pushfold`, parâmetro
+  `use_icm`) geram os dois formatos como spots SEPARADOS (spot_id com
+  sufixo `_chipev` no modo chipEV) — nunca sobrescrevem o spot ICM já
+  em produção pro mesmo matchup/stack. `gto_nodes["ev_mode"]`
+  (`"icm"`/`"chipev"`) marca qual é qual sem precisar inspecionar o
+  spot_id.
 - ⏳ 3-bet "de verdade" (não all-in) pré-flop — não iniciado. A árvore
   de RFI atual trata qualquer resposta a um raise como shove (correto
   pra stack curto/médio, não serve pra stack profundo).
