@@ -35,6 +35,9 @@ jobs:
       - name: Pós-flop turn (MDF + cross-check de runout_equity)
         run: python tests/postflop_turn.py
 
+      - name: Pós-flop — EV por ação (gap de erro vs decisão marginal)
+        run: python tests/postflop_action_evs.py
+
       - name: RFI/Jam multi-tamanho (regressão contra motor legado)
         run: python tests/rfi_jam_multisize.py
 

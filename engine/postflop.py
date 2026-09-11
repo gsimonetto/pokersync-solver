@@ -736,6 +736,243 @@ class PostflopSolver:
             total += w_br[ca] * val
         return total
 
+    # ---- EV por ação (gap entre a ação tomada e a ótima) ----
+
+    def _bet_amount(self, actor, committed_oop, committed_ip, idx):
+        """Mesmo calculo de tamanho de aposta usado em _node_bet_or_check
+        (limitado ao stack restante do apostador)."""
+        own_stack = self.stack_oop if actor == "oop" else self.stack_ip
+        own_committed = committed_oop if actor == "oop" else committed_ip
+        current_pot = self.pot0 + committed_oop + committed_ip
+        remaining = own_stack - own_committed
+        return min(self.bet_sizes[idx] * current_pot, remaining)
+
+    def _facing_bet_reach_splits(self, responder, prefix, opp_reach):
+        """Reconstroi como `opp_reach` se divide entre fold/call/raise num
+        no facing_bet, lendo a estrategia media ja treinada -- mesma
+        logica do ramo 'oponente decide' de _br_facing_bet, so' que
+        devolve os tres pedacos (nao normalizados) em vez de ja seguir
+        a recursao. Usado so' pra montar os `opp_reach` condicionados
+        de compute_action_evs -- nao mexe em nada do best-response."""
+        fold_reach_total = 0.0
+        call_reach = {}
+        raise_reach = {}
+        for c, w in opp_reach.items():
+            if w == 0:
+                continue
+            key = f"{prefix}|facing_bet|{responder}|{c}"
+            if key not in self.trainer.infosets:
+                continue
+            strat = self.trainer.infosets[key].get_average_strategy()
+            fold_reach_total += w * strat[0]
+            if strat[1] > 0:
+                call_reach[c] = w * strat[1]
+            if len(strat) > 2 and strat[2] > 0:
+                raise_reach[c] = w * strat[2]
+        return fold_reach_total, call_reach, raise_reach
+
+    def _bet_or_check_reach_splits(self, opp, prefix, opp_reach):
+        """Equivalente a _facing_bet_reach_splits pro no bet_or_check --
+        como opp_reach se divide entre check e cada tamanho de bet."""
+        check_reach = {}
+        bet_reach = [dict() for _ in self.bet_sizes]
+        for c, w in opp_reach.items():
+            if w == 0:
+                continue
+            key = f"{prefix}|bet_or_check|{opp}|{c}"
+            if key not in self.trainer.infosets:
+                continue
+            strat = self.trainer.infosets[key].get_average_strategy()
+            if strat[0] > 0:
+                check_reach[c] = w * strat[0]
+            for idx in range(len(self.bet_sizes)):
+                if strat[1 + idx] > 0:
+                    bet_reach[idx][c] = w * strat[1 + idx]
+        return check_reach, bet_reach
+
+    def _ev_bet_or_check_own(self, hero, own_class, committed_oop, committed_ip,
+                              opp_reach, board, prefix, is_second):
+        """Espelha o ramo 'br decide' de _br_bet_or_check, mas devolve o EV
+        MEDIO de CADA acao (check + cada tamanho de bet legal) em vez de
+        so' o maximo -- e' a peca central de compute_action_evs()."""
+        total_reach = sum(opp_reach.values())
+        if total_reach <= 0:
+            return {}
+        if is_second:
+            u_check = self._br_end_of_action(hero, own_class, committed_oop, committed_ip, opp_reach, board, prefix + "|xx")
+        else:
+            other = "ip" if hero == "oop" else "oop"
+            u_check = self._br_bet_or_check(
+                hero, other, own_class, committed_oop, committed_ip, opp_reach, board, prefix + "-x", is_second=True,
+            )
+        evs = {"check": u_check / total_reach}
+
+        own_stack = self.stack_oop if hero == "oop" else self.stack_ip
+        own_committed = committed_oop if hero == "oop" else committed_ip
+        current_pot = self.pot0 + committed_oop + committed_ip
+        remaining = own_stack - own_committed
+        for idx, size in enumerate(self.bet_sizes):
+            bet_amt = min(size * current_pot, remaining)
+            if bet_amt <= 1e-9:
+                continue
+            u_bet = self._br_facing_bet(
+                hero, hero, own_class, bet_amt, committed_oop, committed_ip, opp_reach, board, prefix + f"-b{idx}",
+            )
+            evs[f"bet_{size}"] = u_bet / total_reach
+        return evs
+
+    def _ev_facing_bet_own(self, hero, bettor, own_class, bet_amt, committed_oop, committed_ip,
+                            opp_reach, board, prefix):
+        """Espelha o ramo 'br decide' de _br_facing_bet (responder == hero),
+        devolvendo o EV medio de fold/call/raise (raise so' se legal)."""
+        total_reach = sum(opp_reach.values())
+        if total_reach <= 0:
+            return {}
+        new_committed_oop = committed_oop + (bet_amt if bettor == "oop" else 0)
+        new_committed_ip = committed_ip + (bet_amt if bettor == "ip" else 0)
+        u_fold_pair = self._terminal_fold(hero, new_committed_oop, new_committed_ip, self.pot0)
+        ev_fold = u_fold_pair[0] if hero == "oop" else u_fold_pair[1]
+
+        call_committed_oop = new_committed_oop + (bet_amt if hero == "oop" else 0)
+        call_committed_ip = new_committed_ip + (bet_amt if hero == "ip" else 0)
+        u_call = self._br_end_of_action(
+            hero, own_class, call_committed_oop, call_committed_ip, opp_reach, board, prefix + "|call",
+        )
+        evs = {"fold": ev_fold, "call": u_call / total_reach}
+
+        own_stack = self.stack_oop if hero == "oop" else self.stack_ip
+        own_committed = committed_oop if hero == "oop" else committed_ip
+        raise_legal = (own_stack - own_committed - bet_amt) > 1e-9
+        if raise_legal:
+            raise_to = own_stack
+            u_raise = self._br_facing_raise(
+                hero, bettor, own_class, bet_amt, raise_to, new_committed_oop, new_committed_ip, opp_reach, board, prefix,
+            )
+            evs["raise"] = u_raise / total_reach
+        return evs
+
+    def _ev_facing_raise_own(self, hero, bettor, own_class, bet_amt, raise_to, opp_reach, board, prefix):
+        """Espelha o ramo 'br decide' de _br_facing_raise (bettor == hero),
+        devolvendo o EV medio de fold/call."""
+        total_reach = sum(opp_reach.values())
+        if total_reach <= 0:
+            return {}
+        u_fold_pair = self._terminal_fold(bettor, bet_amt, bet_amt, self.pot0)
+        ev_fold = u_fold_pair[0] if hero == "oop" else u_fold_pair[1]
+        own_stack = self.stack_oop if hero == "oop" else self.stack_ip
+        matched = min(own_stack, raise_to)
+        u_call = self._br_end_of_action(hero, own_class, matched, matched, opp_reach, board, prefix + "|allin")
+        return {"fold": ev_fold, "call": u_call / total_reach}
+
+    def compute_action_evs(self):
+        """Calcula o EV de CADA acao disponivel em cada no de decisao (nao
+        so' a frequencia/estrategia media) -- fixando a estrategia media
+        ja treinada do oponente e reaproveitando o mesmo motor de
+        melhor-resposta (_br_*) usado em compute_exploitability(), so'
+        que devolvendo TODAS as acoes em vez de so' a melhor. Serve pra
+        expor o "gap" -- quanto EV se perde escolhendo uma acao que nao
+        e' a otima -- pro produto mostrar "quanto voce perdeu" numa
+        decisao pos-flop (equivalente pos-flop de
+        rfi_jam.py::compute_action_evs, que ja existe so' pro pre-flop).
+
+        Devolve um dict por no de decisao (6 nos possiveis numa unica
+        rua: raiz da OOP, resposta da IP a cada tamanho de bet, resposta
+        da OOP a um raise, decisao da IP depois de um check, resposta da
+        OOP a cada tamanho de bet da IP depois do check, resposta da IP
+        a um raise depois do check). Cada no e' {classe: {"<acao>": ev,
+        ..., "best": "<melhor_acao>", "gaps": {"<acao>": ev_perdido}}}
+        -- ev_perdido = ev(melhor_acao) - ev(essa_acao), sempre >= 0 (0
+        pra propria melhor acao). Nos de tamanho de bet especifico (ex:
+        facing_bet_1) so' aparecem se aquele tamanho for jogavel (nao
+        maior que o stack restante); nos de facing_raise so' aparecem se
+        a acao "raise" tiver alguma probabilidade positiva na
+        estrategia media treinada (senao nao ha' nada pra condicionar)."""
+        def _finish(evs):
+            if not evs:
+                return None
+            best_action = max(evs, key=evs.get)
+            best_ev = evs[best_action]
+            return {**evs, "best": best_action, "gaps": {a: best_ev - v for a, v in evs.items()}}
+
+        out = {}
+
+        # 1) raiz -- OOP decide check vs bet(tamanho)
+        out["root"] = {}
+        root_opp_reach = {cb: self.w_ip[cb] for cb in self.classes_ip}
+        for ca in self.classes_oop:
+            finished = _finish(self._ev_bet_or_check_own("oop", ca, 0.0, 0.0, root_opp_reach, self.board0, "", is_second=False))
+            if finished:
+                out["root"][ca] = finished
+
+        # 2) IP decide fold/call/raise contra cada tamanho de bet da OOP na raiz
+        # 3) OOP decide fold/call contra o raise da IP (quando ela deu raise)
+        for idx in range(len(self.bet_sizes)):
+            bet_amt = self._bet_amount("oop", 0.0, 0.0, idx)
+            if bet_amt <= 1e-9:
+                continue
+            prefix = f"-b{idx}"
+            root_strat = {ca: self.strategy("oop", "root", ca) for ca in self.classes_oop}
+            bet_reach = {
+                ca: self.w_oop[ca] * root_strat[ca][1 + idx]
+                for ca in self.classes_oop if root_strat[ca] is not None and root_strat[ca][1 + idx] > 0
+            }
+            if bet_reach:
+                out[f"facing_bet_{idx}"] = {}
+                for cb in self.classes_ip:
+                    finished = _finish(self._ev_facing_bet_own("ip", "oop", cb, bet_amt, 0.0, 0.0, bet_reach, self.board0, prefix))
+                    if finished:
+                        out[f"facing_bet_{idx}"][cb] = finished
+
+                _, _, raise_reach = self._facing_bet_reach_splits("ip", prefix, bet_reach)
+                if raise_reach:
+                    out[f"facing_raise_{idx}"] = {}
+                    raise_to = self.stack_ip
+                    for ca in self.classes_oop:
+                        finished = _finish(self._ev_facing_raise_own("oop", "oop", ca, bet_amt, raise_to, raise_reach, self.board0, prefix))
+                        if finished:
+                            out[f"facing_raise_{idx}"][ca] = finished
+
+        # 4) IP decide check vs bet(tamanho) depois de OOP checkar
+        oop_own_reach = {ca: self.w_oop[ca] for ca in self.classes_oop}
+        check_reach_root, _ = self._bet_or_check_reach_splits("oop", "", oop_own_reach)
+        if check_reach_root:
+            out["facing_check"] = {}
+            for cb in self.classes_ip:
+                finished = _finish(self._ev_bet_or_check_own("ip", cb, 0.0, 0.0, check_reach_root, self.board0, "-x", is_second=True))
+                if finished:
+                    out["facing_check"][cb] = finished
+
+            # 5) OOP decide fold/call/raise contra cada tamanho de bet da IP (depois do check)
+            # 6) IP decide fold/call contra o raise da OOP (quando ela deu raise)
+            for idx in range(len(self.bet_sizes)):
+                bet_amt = self._bet_amount("ip", 0.0, 0.0, idx)
+                if bet_amt <= 1e-9:
+                    continue
+                prefix = f"-x-b{idx}"
+                facing_check_strat = {cb: self.strategy("ip", "facing_check", cb) for cb in self.classes_ip}
+                bet_reach = {
+                    cb: self.w_ip[cb] * facing_check_strat[cb][1 + idx]
+                    for cb in self.classes_ip
+                    if facing_check_strat[cb] is not None and facing_check_strat[cb][1 + idx] > 0
+                }
+                if bet_reach:
+                    out[f"facing_bet_after_check_{idx}"] = {}
+                    for ca in self.classes_oop:
+                        finished = _finish(self._ev_facing_bet_own("oop", "ip", ca, bet_amt, 0.0, 0.0, bet_reach, self.board0, prefix))
+                        if finished:
+                            out[f"facing_bet_after_check_{idx}"][ca] = finished
+
+                    _, _, raise_reach = self._facing_bet_reach_splits("oop", prefix, bet_reach)
+                    if raise_reach:
+                        out[f"facing_raise_after_check_{idx}"] = {}
+                        raise_to = self.stack_oop
+                        for cb in self.classes_ip:
+                            finished = _finish(self._ev_facing_raise_own("ip", "ip", cb, bet_amt, raise_to, raise_reach, self.board0, prefix))
+                            if finished:
+                                out[f"facing_raise_after_check_{idx}"][cb] = finished
+
+        return out
+
 
 # Compatibilidade com o nome usado na v1 (river-only) -- um board de 5
 # cartas nunca dispara nó de chance, então o comportamento é idêntico.
