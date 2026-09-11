@@ -174,25 +174,37 @@ longo do tempo pra virar Net Expected Profit / EV ROI%).
   Achei e corrigi 1 bug mais antigo durante essa mesma validação (o
   abridor estava usando o mecanismo de decisão errado — fold-ou-jam em
   vez de fold-ou-abrir).
-  **Limitação NOVA encontrada (ainda não corrigida)**: a MEDIÇÃO de
-  exploitability (`best_response_value`/`compute_exploitability`) tem
+  **(2026-09) Segundo bug encontrado e CORRIGIDO**: a MEDIÇÃO de
+  exploitability (`best_response_value`/`compute_exploitability`) tinha
   um vazamento de informação diferente do bug de treino acima — ao
-  decidir a melhor ação do jogador sendo medido, ela olha a mão
+  decidir a melhor ação do jogador sendo medido, ela olhava a mão
   específica sorteada do ADVERSÁRIO na amostra em vez de calcular o
   valor médio sobre a distribuição de mãos dele antes de fixar a
-  decisão (o cuidado que `rfi_jam.py` documenta e faz certo). Isso
-  infla o número em ~4%, de forma sistemática (confirmado até com
-  enumeração exata, sem nenhuma amostragem) — não é a mesma coisa que
-  "mãos de fronteira oscilam" (fenômeno esperado, documentado abaixo);
-  é viés estrutural. `tests/multiway_exploitability_2seat.py` prova o
-  problema e mede exploitability correta só pro caso degenerado de 2
-  jogadores sem ante (delegando pro motor heads-up já validado, sem
-  reescrever a matemática). Corrigir isso pra N>=2 de verdade é
-  reescrever `_br_open_or_fold`/`_br_fold_or_jam`/`_br_resolve_responders`
-  do zero — não feito ainda. **Não confiar no número de
-  `compute_exploitability()` pra decisão de produto** (ex: "esse
-  resultado de UTG/MP/HJ/CO está bom o bastante?") até essa reescrita
-  existir.
+  decisão (o cuidado que `rfi_jam.py` já documentava e fazia certo).
+  Isso inflava o número em ~4%, de forma sistemática (confirmado até
+  com enumeração exata, sem nenhuma amostragem) — não era a mesma
+  coisa que "mãos de fronteira oscilam" (fenômeno esperado, documentado
+  abaixo); era viés estrutural.
+  **Corrigido**: a decisão própria de cada jogador agora é FIXADA por
+  classe de mão (média sobre muitas reamostragens independentes dos
+  adversários, nunca espiando a amostra específica) antes de qualquer
+  avaliação final — só o abridor precisa de ordem bottom-up (fase 2
+  fixada antes da raiz, já que é o único que decide duas vezes na mesma
+  mão). Validado pro caso degenerado de 2 jogadores: bate com o motor
+  heads-up exato dentro de ruído normal de amostragem (~0,1% de
+  diferença, sem viés numa direção só) — ver
+  `tests/multiway_exploitability_2seat.py`.
+  **Trade-off de performance**: com 2 seats, o showdown usa a tabela de
+  equity pré-computada — rápido. Com 3+ seats, cada showdown chama o
+  cálculo de equity multiway de verdade (simulação de carta real via
+  `treys`), que não é cacheável aqui (cada amostra sorteia mãos novas
+  dos adversários de propósito, pra não vazar informação) — bem mais
+  lento, escala com o número de seats. Medido: 3 seats com amostragem
+  reduzida levou ~90s pro `compute_exploitability()` inteiro; para 8
+  seats (UTG), espere minutos a dezenas de minutos. Ajuste
+  `policy_samples`/`iterations` pra baixo se só precisar de um
+  termômetro grosseiro (ver docstring de `best_response_value` e os
+  exemplos calibrados em `tests/multiway_exploitability_2seat.py`).
   Mãos de fronteira podem oscilar bastante entre rodadas (mesmo
   fenômeno já documentado no heads-up, não é bug). É lento por
   natureza (equity multiway via Monte Carlo) — pensado pra rodar

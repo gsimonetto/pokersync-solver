@@ -650,7 +650,7 @@ class MultiwayRfiSolver:
             return self._eval_resolve_responders_forced(jammer, responders, 0, {jammer}, hands, avg, br_seat, action)
         return self._eval_resolve_responders(jammer, responders, 0, {jammer}, hands, avg)
 
-    def best_response_value(self, br_seat, avg_strategy=None, iterations=1000, seed=123, policy_samples=400):
+    def best_response_value(self, br_seat, avg_strategy=None, iterations=1000, seed=123, policy_samples=50):
         """Quanto `br_seat` ganharia jogando a MELHOR ação em cada decisão
         própria (fixada sem vazamento -- ver `_fix_br_policy` e a seção
         acima), enquanto todos os outros seats seguem `avg_strategy`.
@@ -658,12 +658,31 @@ class MultiwayRfiSolver:
         Duas amostragens diferentes, de propósito:
           - `policy_samples`: quantas vezes resorteamos os ADVERSÁRIOS
             (mão de br_seat fixa) pra decidir a política de br_seat por
-            classe -- isso só acontece uma vez por classe, então pode
-            ser generoso sem ficar lento demais.
+            classe -- roda uma vez POR CLASSE de mão de br_seat (até
+            169 vezes) e por decisão própria dele (fase 1 + até N-1
+            respostas de fase 2), então o custo total escala com
+            N_classes × N_decisões × policy_samples.
           - `iterations`: quantas mãos completas (todos os seats,
             incluindo br_seat) sorteamos pra avaliar o valor médio final,
             já com a política de br_seat fixada e sem risco de vazamento
-            (a política não muda mais por amostra)."""
+            (a política não muda mais por amostra) -- bem mais barato,
+            não escala com N_classes.
+
+        CUSTO (2026-09, medido): com 2 seats, o showdown usa a tabela
+        de equity pré-computada (`equity_matrix`) — rápido, `policy_samples`
+        alto (100s) não pesa. Com 3+ seats, cada showdown chama
+        `multiway_equity()` (simulação de carta real via `treys`) — bem
+        mais caro, e NÃO é cacheável aqui (cada amostra sorteia mãos
+        novas dos adversários de propósito, pra não vazar informação).
+        Medido: 3 seats, `policy_samples=10` (bem menor que o default)
+        levou ~90s pra `compute_exploitability()` inteiro (soma dos 3
+        seats). Escala com o número de seats (mais responders em fase
+        2, mais jammers possíveis) — pra 8 seats (UTG), espere minutos
+        a dezenas de minutos. Não é bug, é o custo real de medir isso
+        sem vazar informação com muitos jogadores — ajuste
+        `policy_samples`/`iterations` pra baixo se só precisar de um
+        termômetro grosseiro (ver tests/multiway_exploitability_2seat.py
+        pra exemplos calibrados)."""
         if avg_strategy is None:
             avg_strategy = self.average_strategy()
         rng = random.Random(seed)
@@ -676,11 +695,13 @@ class MultiwayRfiSolver:
             total += icm.get(br_seat, 0.0)
         return total / iterations
 
-    def compute_exploitability(self, avg_strategy=None, iterations=1000, seed=123, policy_samples=400):
+    def compute_exploitability(self, avg_strategy=None, iterations=1000, seed=123, policy_samples=50):
         """Best response de cada seat, um de cada vez (mesma convenção do
         motor heads-up: soma das best responses, não uma diferença contra
         o valor sob a média -- serve como termômetro de convergência
-        comparável entre runs, não como exploitability literal em $)."""
+        comparável entre runs, não como exploitability literal em $).
+        Ver aviso de custo em `best_response_value` -- com 3+ seats,
+        rode isso separado do treino (não em loop apertado)."""
         if avg_strategy is None:
             avg_strategy = self.average_strategy()
         return {
