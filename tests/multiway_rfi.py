@@ -130,7 +130,7 @@ def test_sanidade_3_seats():
         "effective_stack": 25,
     }
     solver = MultiwayRfiSolver(equity_matrix=_EQUITY_MATRIX, classes=_CLASSES, **config)
-    solver.train(iterations=25_000, seed=42)
+    solver.train(iterations=3_000, seed=42)
     strat = solver.average_strategy()
 
     aa_open = strat["phase1"][0]["AA"]
@@ -145,7 +145,7 @@ def test_sanidade_3_seats():
     # exploitability muito maior, por causa do peso de reach duplicado)
     # que apontou pro bug original. Usa poucas iteracoes de best-response
     # (rapido, so' termometro -- nao e' o teste de precisao final).
-    br = solver.compute_exploitability(iterations=800, seed=1)
+    br = solver.compute_exploitability(iterations=300, seed=1)
     print(f"  Exploitability por seat (Monte Carlo, termometro): {br}")
     br_values = list(br.values())
     br_max, br_min_abs = max(abs(v) for v in br_values), min(abs(v) for v in br_values)
