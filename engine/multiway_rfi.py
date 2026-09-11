@@ -452,7 +452,32 @@ class MultiwayRfiSolver:
         dá pra enumerar todas as combinações de mão exatamente -- com 4+
         seats isso explode (169^4 combinações só pra 4 jogadores) -- por
         isso a amostragem, igual já é feita no treino (`train`) e na
-        equity multiway (`_multiway_eq`)."""
+        equity multiway (`_multiway_eq`).
+
+        LIMITAÇÃO CONHECIDA (2026-09, ver
+        tests/multiway_exploitability_2seat.py): `_br_open_or_fold` /
+        `_br_fold_or_jam` / `_br_resolve_responders` decidem a MELHOR
+        ação de `br_seat` olhando pra mão ESPECÍFICA sorteada do
+        adversário nessa amostra, em vez de calcular o valor esperado
+        MÉDIO sobre a distribuição de mãos do adversário antes de fixar
+        a decisão (o cuidado que `rfi_jam.py::best_response_value`
+        documenta e faz certo: "o mais profundo precisa ser resolvido
+        primeiro e FIXADO antes de calcular a raiz, senão a raiz
+        enxergaria a carta do oponente por baixo dos panos"). Isso
+        infla sistematicamente o valor retornado (~4% a mais,
+        confirmado até com enumeração EXATA — não é ruído de
+        amostragem, é vazamento de informação estrutural). Corrigir
+        isso de verdade para N>=2 jogadores exige reescrever esses três
+        métodos (calcular a decisão mais profunda do próprio jogador
+        primeiro, média sobre a distribuição do adversário, FIXAR,
+        depois subir pro nível anterior) — não feito ainda.
+        `tests/multiway_exploitability_2seat.py` prova o problema e
+        oferece uma forma exata de medir exploitability só pro caso
+        degenerado de 2 jogadores sem ante (delega pro motor heads-up
+        já validado). NÃO usar o número deste método pra decisão de
+        produto (ex: "esse resultado de UTG/MP/HJ/CO está bom o
+        bastante?") até essa reescrita existir — ele é só um termômetro
+        aproximado e otimista demais, não uma medida confiável."""
         if avg_strategy is None:
             avg_strategy = self.average_strategy()
         random.seed(seed)
