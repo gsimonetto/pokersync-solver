@@ -88,7 +88,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from engine.multiway_rfi import MultiwayRfiSolver  # noqa: E402
-from engine.hand_classes import build_equity_matrix  # noqa: E402
+from engine.equity_final import build_final_equity_matrix  # noqa: E402
 
 # Ordem de ação preflop (8-max): UTG, UTG+1, MP, HJ, CO, BTN, SB, BB.
 # Pra cada posição de abertura, os seats modelados são ela mesma + todo
@@ -140,8 +140,8 @@ def load_or_build_equity_matrix():
         with open(EQUITY_MATRIX_PATH, "rb") as f:
             d = pickle.load(f)
         return d["matrix"], d["classes"]
-    print("Construindo matriz de equity pairwise (só na primeira vez, alguns minutos)...")
-    matrix, classes, _stats = build_equity_matrix()
+    print("Construindo matriz de equity pairwise com blockers (só na primeira vez, alguns minutos)...")
+    matrix, classes, _stats = build_final_equity_matrix()
     EQUITY_MATRIX_PATH.parent.mkdir(exist_ok=True)
     with open(EQUITY_MATRIX_PATH, "wb") as f:
         pickle.dump({"matrix": matrix, "classes": classes}, f)
