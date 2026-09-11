@@ -169,6 +169,32 @@ class MultiwayRfiSolver:
                       for i in range(self.n_seats)}
             self._play_open_or_fold(hands)
 
+    # ---- reach probability (correcao 2026-09) ------------------------
+    #
+    # BUG encontrado: as funcoes de fase 1/2 abaixo atualizavam
+    # regret_sum SEM pesar pela probabilidade dos OUTROS jogadores terem
+    # realmente tomado as acoes que levam ate aquele infoset (chamada de
+    # "opponent reach"/"counterfactual reach" na literatura de CFR) --
+    # so' o motor heads-up (rfi_jam.py) fazia isso certo (p_sb/p_bb
+    # threading em _node_bb_facing_raise/_node_sb_facing_jam). Sem esse
+    # peso, o regret acumulado superestima decisoes raramente
+    # alcancadas e o equilibrio aprendido diverge do correto -- e' o que
+    # explicava spots de 2 seats (caso degenerado) NAO baterem com o
+    # motor heads-up ja validado, mesmo usando a MESMA tabela de equity
+    # (confirmado isolando a variavel: com equity identica, a
+    # divergencia continuou grande -- so' podia ser bug de logica, nao
+    # ruido de amostragem).
+    #
+    # Fix: `opp_reach` agora acompanha, multiplicativamente, a
+    # probabilidade de TODOS os jogadores que agiram ANTES do atual
+    # terem escolhido exatamente o caminho percorrido ate aqui (abrir,
+    # foldar, jam, call -- o que for). regret_sum de quem esta decidindo
+    # AGORA e' pesado por esse valor (igual p_sb/p_bb no motor heads-up).
+    # strategy_sum continua como estava (pesado pela propria reach do
+    # jogador, que so' importa pro abridor respondendo em fase 2 --
+    # `opener_reach`, ja existia e estava certo).
+
+
     def _icm_fold_root(self, hands):
         """Abridor folda antes de abrir (nunca chega a investir R):
         perde so o post que ja tinha (0 pra posicoes sem blind). Sem
@@ -183,7 +209,12 @@ class MultiwayRfiSolver:
     def _play_open_or_fold(self, hands):
         """Decisao do ABRIDOR (seat 0): fold ou abrir (nao e jam --
         e um raise pequeno, R, igual o motor heads-up). So depois de
-        abrir e que os demais seats entram na sequencia fold-ou-jam."""
+        abrir e que os demais seats entram na sequencia fold-ou-jam.
+
+        E' o unico infoset onde ninguem mais agiu antes -- opp_reach
+        e' sempre 1.0 aqui (nao ha' "outros jogadores" pra pesar), por
+        isso nao aparece como parametro nesta funcao (mesma convencao
+        de rfi_jam.py: p_bb comeca em 1.0 no _node_root)."""
         infoset = self.phase1[0][hands[0]]
         strat = infoset.current_strategy()
 
@@ -191,8 +222,9 @@ class MultiwayRfiSolver:
         # strat[1] = probabilidade do CO abrir com essa mao -- e' a
         # "reach probability" do proprio CO pra chegar em qualquer decisao
         # de fase 2 dele mais adiante (ver comentario em _resolve_responders
-        # sobre por que isso importa).
-        icm_open = self._play_fold_or_jam(1, hands, opener_reach=strat[1])
+        # sobre por que isso importa) E TAMBEM a opp_reach que os seats
+        # seguintes (fase 1) precisam pra pesar o proprio regret deles.
+        icm_open = self._play_fold_or_jam(1, hands, opener_reach=strat[1], opp_reach=strat[1])
 
         node_val = {}
         all_seats = set(icm_fold.keys()) | set(icm_open.keys())
@@ -222,19 +254,28 @@ class MultiwayRfiSolver:
         deltas[0] = total_won
         return self._icm(deltas)
 
-    def _play_fold_or_jam(self, seat_i, hands, opener_reach):
+    def _play_fold_or_jam(self, seat_i, hands, opener_reach, opp_reach):
         """Decisao de cada seat DEPOIS do abridor (seat_i >= 1): fold
         ou jam (all-in), quando a acao chega nele (todos antes dele
         ja foldaram, por construcao -- essa funcao so e chamada na
-        sequencia, nunca fora de ordem)."""
+        sequencia, nunca fora de ordem).
+
+        opp_reach: produto das probabilidades de TODOS os jogadores
+        anteriores (abridor + seats 1..seat_i-1) terem realmente
+        escolhido o caminho que leva ate aqui -- pesa o regret_sum de
+        seat_i (igual p_sb em rfi_jam.py::_node_bb_facing_raise)."""
         if seat_i >= self.n_seats:
             return self._terminal_all_fold(hands)
 
         infoset = self.phase1[seat_i][hands[seat_i]]
         strat = infoset.current_strategy()
 
-        icm_fold = self._play_fold_or_jam(seat_i + 1, hands, opener_reach)
-        icm_jam = self._play_phase2(jammer=seat_i, hands=hands, opener_reach=opener_reach)
+        # Cada ramo carrega opp_reach ATUALIZADO com a propria escolha de
+        # seat_i (que passa a ser "reach de um jogador anterior" pro que
+        # vem depois) -- fold entra igual no ramo seguinte de fase 1,
+        # jam entra na fase 2 como o jammer.
+        icm_fold = self._play_fold_or_jam(seat_i + 1, hands, opener_reach, opp_reach * strat[0])
+        icm_jam = self._play_phase2(jammer=seat_i, hands=hands, opener_reach=opener_reach, opp_reach=opp_reach * strat[1])
 
         node_val = {}
         all_seats = set(icm_fold.keys()) | set(icm_jam.keys())
@@ -243,14 +284,14 @@ class MultiwayRfiSolver:
 
         regret = [icm_fold.get(seat_i, 0.0) - node_val.get(seat_i, 0.0),
                   icm_jam.get(seat_i, 0.0) - node_val.get(seat_i, 0.0)]
-        infoset.regret_sum[0] += regret[0]
-        infoset.regret_sum[1] += regret[1]
+        infoset.regret_sum[0] += opp_reach * regret[0]
+        infoset.regret_sum[1] += opp_reach * regret[1]
         infoset.strategy_sum[0] += strat[0]
         infoset.strategy_sum[1] += strat[1]
 
         return node_val
 
-    def _play_phase2(self, jammer, hands, opener_reach):
+    def _play_phase2(self, jammer, hands, opener_reach, opp_reach):
         """Todos os seats DEPOIS do jammer que ainda nao agiram, em
         ordem, decidem fold/call; no final o abridor (seat 0, que
         sempre abriu -- nunca chega aqui tendo foldado, isso ja e
@@ -258,9 +299,9 @@ class MultiwayRfiSolver:
         responders = [i for i in range(self.n_seats) if i > jammer]
         responders.append(0)  # abridor sempre responde (sempre abriu antes)
 
-        return self._resolve_responders(jammer, responders, 0, {jammer}, hands, opener_reach)
+        return self._resolve_responders(jammer, responders, 0, {jammer}, hands, opener_reach, opp_reach)
 
-    def _resolve_responders(self, jammer, responders, idx, live_set, hands, opener_reach):
+    def _resolve_responders(self, jammer, responders, idx, live_set, hands, opener_reach, opp_reach):
         if idx >= len(responders):
             return self._showdown(live_set, hands)
 
@@ -268,8 +309,8 @@ class MultiwayRfiSolver:
         infoset = self.phase2[seat_i][jammer][hands[seat_i]]
         strat = infoset.current_strategy()
 
-        icm_fold = self._resolve_responders(jammer, responders, idx + 1, live_set, hands, opener_reach)
-        icm_call = self._resolve_responders(jammer, responders, idx + 1, live_set | {seat_i}, hands, opener_reach)
+        icm_fold = self._resolve_responders(jammer, responders, idx + 1, live_set, hands, opener_reach, opp_reach * strat[0])
+        icm_call = self._resolve_responders(jammer, responders, idx + 1, live_set | {seat_i}, hands, opener_reach, opp_reach * strat[1])
 
         node_val = {}
         all_seats = set(icm_fold.keys()) | set(icm_call.keys())
@@ -278,8 +319,8 @@ class MultiwayRfiSolver:
 
         regret = [icm_fold.get(seat_i, 0.0) - node_val.get(seat_i, 0.0),
                   icm_call.get(seat_i, 0.0) - node_val.get(seat_i, 0.0)]
-        infoset.regret_sum[0] += regret[0]
-        infoset.regret_sum[1] += regret[1]
+        infoset.regret_sum[0] += opp_reach * regret[0]
+        infoset.regret_sum[1] += opp_reach * regret[1]
         # A media de estrategia (strategy_sum) do CFR precisa ser pesada
         # pela probabilidade do PROPRIO jogador ter chegado ate essa ficha
         # (formula padrao de "average strategy" do CFR: soma de
