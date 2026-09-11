@@ -169,6 +169,42 @@ class MultiwayRfiSolver:
                       for i in range(self.n_seats)}
             self._play_open_or_fold(hands)
 
+    # ---- reach probability (correcao 2026-09) ------------------------
+    #
+    # BUG encontrado: as funcoes de fase 1/2 abaixo atualizavam
+    # regret_sum SEM pesar pela probabilidade dos OUTROS jogadores terem
+    # realmente tomado as acoes que levam ate aquele infoset (chamada de
+    # "opponent reach"/"counterfactual reach" na literatura de CFR) --
+    # so' o motor heads-up (rfi_jam.py) fazia isso certo (p_sb/p_bb
+    # threading em _node_bb_facing_raise/_node_sb_facing_jam). Sem esse
+    # peso, o regret acumulado superestima decisoes raramente
+    # alcancadas e o equilibrio aprendido diverge do correto -- e' o que
+    # explicava spots de 2 seats (caso degenerado) NAO baterem com o
+    # motor heads-up ja validado, mesmo usando a MESMA tabela de equity
+    # (confirmado isolando a variavel: com equity identica, a
+    # divergencia continuou grande -- so' podia ser bug de logica, nao
+    # ruido de amostragem).
+    #
+    # Fix (v2 -- a v1 tinha um bug sutil, ver abaixo): `own_reach` e' um
+    # dict {seat: probabilidade} que acompanha, PRA CADA JOGADOR
+    # separadamente, a chance de ELE MESMO ter escolhido o caminho
+    # percorrido ate aqui. O regret_sum de quem esta decidindo AGORA e'
+    # pesado pelo produto da reach de TODOS OS OUTROS (excluindo a
+    # propria) -- e' isso que rfi_jam.py faz com p_sb/p_bb.
+    #
+    # BUG da v1: eu tinha um unico escalar `opp_reach` acumulando a
+    # reach de TODOS que agiram antes, sem excluir o proprio jogador
+    # quando ele age DUAS VEZES na mesma mao (o abridor: abre na fase 1,
+    # responde ao jam na fase 2). Isso fazia a propria reach do abridor
+    # (de ter aberto) entrar de novo no peso do regret dele mesmo na
+    # fase 2 -- contava a mesma probabilidade duas vezes. Confirmado
+    # isolando 1 iteracao (sem ruido nenhum): o regret_sum da decisao
+    # "SB responde ao jam" saia exatamente pela METADE do valor do
+    # motor heads-up (0.5x, porque a reach do abridor entrava um fator
+    # 0.5 a mais que devia). strategy_sum nunca teve esse problema (ja
+    # usava a reach do PROPRIO jogador de proposito, que e' o correto).
+
+
     def _icm_fold_root(self, hands):
         """Abridor folda antes de abrir (nunca chega a investir R):
         perde so o post que ja tinha (0 pra posicoes sem blind). Sem
@@ -180,19 +216,35 @@ class MultiwayRfiSolver:
             return self._icm({0: 0.0})
         return self._icm({0: -op, 1: op})
 
+    def _opp_reach(self, own_reach, seat_i):
+        """Produto da reach de TODOS OS OUTROS jogadores (exclui a
+        propria) -- o peso certo pro regret_sum de quem esta decidindo
+        agora, em qualquer fase."""
+        p = 1.0
+        for s, r in own_reach.items():
+            if s != seat_i:
+                p *= r
+        return p
+
     def _play_open_or_fold(self, hands):
         """Decisao do ABRIDOR (seat 0): fold ou abrir (nao e jam --
         e um raise pequeno, R, igual o motor heads-up). So depois de
-        abrir e que os demais seats entram na sequencia fold-ou-jam."""
+        abrir e que os demais seats entram na sequencia fold-ou-jam.
+
+        E' o unico infoset onde ninguem mais agiu antes -- ninguem tem
+        reach reduzida ainda, entao o regret_sum de seat 0 aqui nao
+        precisa de peso nenhum (equivalente a opp_reach=1.0, mesma
+        convencao de rfi_jam.py: p_bb comeca em 1.0 no _node_root)."""
         infoset = self.phase1[0][hands[0]]
         strat = infoset.current_strategy()
 
         icm_fold = self._icm_fold_root(hands)
-        # strat[1] = probabilidade do CO abrir com essa mao -- e' a
-        # "reach probability" do proprio CO pra chegar em qualquer decisao
-        # de fase 2 dele mais adiante (ver comentario em _resolve_responders
-        # sobre por que isso importa).
-        icm_open = self._play_fold_or_jam(1, hands, opener_reach=strat[1])
+        # own_reach[0] = strat[1] (chance do proprio abridor ter aberto)
+        # -- entra no dict pra ser excluida do peso do regret DELE MESMO
+        # mais adiante (fase 2), e conta normalmente como "reach de um
+        # jogador anterior" pro regret de qualquer outro seat.
+        own_reach = {0: strat[1]}
+        icm_open = self._play_fold_or_jam(1, hands, own_reach)
 
         node_val = {}
         all_seats = set(icm_fold.keys()) | set(icm_open.keys())
@@ -222,19 +274,32 @@ class MultiwayRfiSolver:
         deltas[0] = total_won
         return self._icm(deltas)
 
-    def _play_fold_or_jam(self, seat_i, hands, opener_reach):
+    def _play_fold_or_jam(self, seat_i, hands, own_reach):
         """Decisao de cada seat DEPOIS do abridor (seat_i >= 1): fold
         ou jam (all-in), quando a acao chega nele (todos antes dele
         ja foldaram, por construcao -- essa funcao so e chamada na
-        sequencia, nunca fora de ordem)."""
+        sequencia, nunca fora de ordem).
+
+        own_reach: dict {seat: reach}, uma entrada por jogador que ja
+        tomou alguma decisao no caminho ate aqui. O regret_sum de
+        seat_i e' pesado por _opp_reach(own_reach, seat_i) -- produto
+        de todos OS OUTROS, nunca a propria (mesmo esquema de p_sb em
+        rfi_jam.py::_node_bb_facing_raise)."""
         if seat_i >= self.n_seats:
             return self._terminal_all_fold(hands)
 
         infoset = self.phase1[seat_i][hands[seat_i]]
         strat = infoset.current_strategy()
+        opp_reach = self._opp_reach(own_reach, seat_i)
 
-        icm_fold = self._play_fold_or_jam(seat_i + 1, hands, opener_reach)
-        icm_jam = self._play_phase2(jammer=seat_i, hands=hands, opener_reach=opener_reach)
+        # Cada ramo recebe seu PROPRIO dict (nunca muta o do chamador --
+        # os dois ramos sao caminhos DIFERENTES, nao podem compartilhar
+        # estado) com a reach de seat_i atualizada pra essa escolha.
+        reach_fold = {**own_reach, seat_i: own_reach.get(seat_i, 1.0) * strat[0]}
+        reach_jam = {**own_reach, seat_i: own_reach.get(seat_i, 1.0) * strat[1]}
+
+        icm_fold = self._play_fold_or_jam(seat_i + 1, hands, reach_fold)
+        icm_jam = self._play_phase2(jammer=seat_i, hands=hands, own_reach=reach_jam)
 
         node_val = {}
         all_seats = set(icm_fold.keys()) | set(icm_jam.keys())
@@ -243,14 +308,14 @@ class MultiwayRfiSolver:
 
         regret = [icm_fold.get(seat_i, 0.0) - node_val.get(seat_i, 0.0),
                   icm_jam.get(seat_i, 0.0) - node_val.get(seat_i, 0.0)]
-        infoset.regret_sum[0] += regret[0]
-        infoset.regret_sum[1] += regret[1]
+        infoset.regret_sum[0] += opp_reach * regret[0]
+        infoset.regret_sum[1] += opp_reach * regret[1]
         infoset.strategy_sum[0] += strat[0]
         infoset.strategy_sum[1] += strat[1]
 
         return node_val
 
-    def _play_phase2(self, jammer, hands, opener_reach):
+    def _play_phase2(self, jammer, hands, own_reach):
         """Todos os seats DEPOIS do jammer que ainda nao agiram, em
         ordem, decidem fold/call; no final o abridor (seat 0, que
         sempre abriu -- nunca chega aqui tendo foldado, isso ja e
@@ -258,18 +323,26 @@ class MultiwayRfiSolver:
         responders = [i for i in range(self.n_seats) if i > jammer]
         responders.append(0)  # abridor sempre responde (sempre abriu antes)
 
-        return self._resolve_responders(jammer, responders, 0, {jammer}, hands, opener_reach)
+        return self._resolve_responders(jammer, responders, 0, {jammer}, hands, own_reach)
 
-    def _resolve_responders(self, jammer, responders, idx, live_set, hands, opener_reach):
+    def _resolve_responders(self, jammer, responders, idx, live_set, hands, own_reach):
         if idx >= len(responders):
             return self._showdown(live_set, hands)
 
         seat_i = responders[idx]
         infoset = self.phase2[seat_i][jammer][hands[seat_i]]
         strat = infoset.current_strategy()
+        opp_reach = self._opp_reach(own_reach, seat_i)
+        # peso da propria strategy_sum (ver comentario abaixo) -- pra
+        # todo mundo aqui e' 1.0 (primeira decisao), EXCETO o abridor
+        # (seat 0), que ja' carrega a reach de ter aberto na fase 1.
+        own_weight = own_reach.get(seat_i, 1.0)
 
-        icm_fold = self._resolve_responders(jammer, responders, idx + 1, live_set, hands, opener_reach)
-        icm_call = self._resolve_responders(jammer, responders, idx + 1, live_set | {seat_i}, hands, opener_reach)
+        reach_fold = {**own_reach, seat_i: own_weight * strat[0]}
+        reach_call = {**own_reach, seat_i: own_weight * strat[1]}
+
+        icm_fold = self._resolve_responders(jammer, responders, idx + 1, live_set, hands, reach_fold)
+        icm_call = self._resolve_responders(jammer, responders, idx + 1, live_set | {seat_i}, hands, reach_call)
 
         node_val = {}
         all_seats = set(icm_fold.keys()) | set(icm_call.keys())
@@ -278,8 +351,8 @@ class MultiwayRfiSolver:
 
         regret = [icm_fold.get(seat_i, 0.0) - node_val.get(seat_i, 0.0),
                   icm_call.get(seat_i, 0.0) - node_val.get(seat_i, 0.0)]
-        infoset.regret_sum[0] += regret[0]
-        infoset.regret_sum[1] += regret[1]
+        infoset.regret_sum[0] += opp_reach * regret[0]
+        infoset.regret_sum[1] += opp_reach * regret[1]
         # A media de estrategia (strategy_sum) do CFR precisa ser pesada
         # pela probabilidade do PROPRIO jogador ter chegado ate essa ficha
         # (formula padrao de "average strategy" do CFR: soma de
@@ -292,9 +365,8 @@ class MultiwayRfiSolver:
         # dificilmente abriria -- e' o que estava inflando a
         # exploitability do CO bem acima dos outros seats, mesmo depois
         # de separar a decisao por jammer.
-        weight = opener_reach if seat_i == 0 else 1.0
-        infoset.strategy_sum[0] += weight * strat[0]
-        infoset.strategy_sum[1] += weight * strat[1]
+        infoset.strategy_sum[0] += own_weight * strat[0]
+        infoset.strategy_sum[1] += own_weight * strat[1]
 
         return node_val
 

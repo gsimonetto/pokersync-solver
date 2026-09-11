@@ -76,3 +76,16 @@ if __name__ == "__main__":
     # esse numero como validado -- precisaria de MUITO mais iteracoes.
     # Ver README.
     print(f"\nSanidade (convergencia lenta confirmada via exploitability, ver README): AA bet={aa_bet:.2f} KK bet={kk_bet:.2f}")
+
+    # Este script e' EXPLORATORIO, de proposito, e NUNCA deve "passar"
+    # (exit code 0) -- mesmo quando os numeros acima batem com o MDF
+    # aproximado, isso nao significa que o flop esta validado (ver
+    # docstring do arquivo e README: exploitability de 14% em 50k
+    # iteracoes e' alto demais pra confiar). Sair com erro de proposito
+    # aqui e' o que impede alguem de un dia colar `python
+    # tests/postflop_flop_check.py` num workflow de CI pensando que e'
+    # um teste de verdade tipo postflop_river.py/postflop_turn.py --
+    # se isso acontecer, o CI vai FALHAR sempre, o que e' o resultado
+    # certo ate o flop ganhar uma validacao de verdade.
+    print("\n[NAO GATEAR NO CI] Resultado exploratorio, flop ainda NAO esta validado -- ver README.")
+    sys.exit(1)

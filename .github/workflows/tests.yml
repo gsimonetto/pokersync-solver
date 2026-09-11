@@ -20,11 +20,20 @@ jobs:
       - name: Núcleo do CFR (Kuhn Poker, exploitability conhecida)
         run: python tests/kuhn_poker.py
 
+      - name: ICM (Malmuth-Harville) — propriedades matemáticas
+        run: python tests/icm.py
+
+      - name: Equity pré-flop — contra números conhecidos
+        run: python tests/equity.py
+
       - name: Pós-flop river (MDF exata + exploitability rigorosa)
         run: python tests/postflop_river.py
 
       - name: Pós-flop river — exploitability
         run: python tests/postflop_exploitability.py
+
+      - name: Pós-flop turn (MDF + cross-check de runout_equity)
+        run: python tests/postflop_turn.py
 
       - name: RFI/Jam multi-tamanho (regressão contra motor legado)
         run: python tests/rfi_jam_multisize.py
