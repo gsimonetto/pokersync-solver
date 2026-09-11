@@ -10,15 +10,13 @@ chance (carta ainda não revelada) e não têm essa mesma validação de
 produção ainda -- não usar este job pra eles sem repetir esse processo
 de validação primeiro.
 
-Diferença importante em relação a solve_rfi_jam_batch.py: o motor
-pós-flop (engine/postflop.py) ainda NÃO calcula EV por classe de mão
-(só frequência de estratégia + exploitability agregada -- ver
-PostflopSolver, sem equivalente a compute_action_evs()). Por isso
-gto_nodes aqui carrega só frequência ([freq], não [freq, ev, gap]
-como no RFI/Jam) -- o veredito no frontend pode classificar por
-frequência (classifyFrequency já faz isso hoje), mas a mensagem de
-"quanto valor você deixou na mesa" (gap) fica pra depois, quando o
-motor ganhar esse cálculo.
+Desde que PostflopSolver ganhou compute_action_evs() (equivalente
+pós-flop de rfi_jam.py::compute_action_evs), gto_nodes aqui carrega o
+mesmo formato compacto [freq, ev, gap] já usado no RFI/Jam -- não só
+frequência. "ev"/"gap" ficam null quando o infoset nunca foi
+alcançado no treino (ex: uma classe que sempre faz outra coisa antes
+de chegar nesse nó -- não tem reach pra condicionar o EV médio, ver
+compute_action_evs() no engine).
 
 Range de exemplo: como o motor não modela as ruas anteriores (flop/
 turn), quem chama este job precisa fornecer range_oop/range_ip já
@@ -36,7 +34,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from engine.postflop import PostflopSolver  # noqa: E402
 from jobs.supabase_client import get_client  # noqa: E402
 
-ENGINE_VERSION = "pokersync-solver-v0.5.0-postflop-river"
+ENGINE_VERSION = "pokersync-solver-v0.6.0-postflop-river-ev"
 
 # Primeiro spot ilustrativo: c-bet de river num board seco/desconectado,
 # pote de tamanho médio, profundidade rasa o bastante pra caber 1 raise
@@ -61,38 +59,56 @@ DEFAULT_CBET_RIVER_SPOT = {
 }
 
 
-def _round_strategy(strat: dict) -> dict:
-    return {k: round(v, 4) for k, v in strat.items()}
+def _merge_freq_ev(freq_row: dict, ev_row: dict | None) -> dict:
+    """Combina {acao: freq} (da estrategia media) com o {acao: ev, ...,
+    "gaps": {...}} de compute_action_evs() -- formato COMPACTO de
+    producao [freq, ev, gap] por acao, mesmo espirito de
+    solve_rfi_jam_batch.py::_compact_phase. ev/gap ficam None quando o
+    infoset nunca foi alcancado no treino (compute_action_evs() so'
+    inclui classes com reach > 0 -- ver docstring do metodo)."""
+    out = {}
+    for action, freq in freq_row.items():
+        ev = ev_row.get(action) if ev_row else None
+        gap = ev_row["gaps"].get(action) if ev_row else None
+        out[action] = [
+            round(freq, 4),
+            round(ev, 3) if ev is not None else None,
+            round(gap, 3) if gap is not None else None,
+        ]
+    return out
 
 
 def _facing_bet_by_size(solver: PostflopSolver, bettor: str, responder_classes: list,
-                         after_check: bool) -> dict:
+                         after_check: bool, evs: dict, node_prefix: str) -> dict:
     out = {}
     for idx, size in enumerate(solver.bet_sizes):
         per_class = {}
+        ev_node = evs.get(f"{node_prefix}_{idx}", {})
         for c in responder_classes:
             s = solver.facing_bet_strategy(bettor, idx, c, after_check=after_check)
             if s is None:
                 continue
-            row = {"fold": round(s[0], 4), "call": round(s[1], 4)}
+            freq_row = {"fold": s[0], "call": s[1]}
             if len(s) > 2:
-                row["raise"] = round(s[2], 4)
-            per_class[c] = row
+                freq_row["raise"] = s[2]
+            per_class[c] = _merge_freq_ev(freq_row, ev_node.get(c))
         if per_class:
             out[str(size)] = per_class
     return out
 
 
 def _facing_raise_by_size(solver: PostflopSolver, bettor: str, bettor_classes: list,
-                           after_check: bool) -> dict:
+                           after_check: bool, evs: dict, node_prefix: str) -> dict:
     out = {}
     for idx, size in enumerate(solver.bet_sizes):
         per_class = {}
+        ev_node = evs.get(f"{node_prefix}_{idx}", {})
         for c in bettor_classes:
             s = solver.facing_raise_strategy(bettor, idx, c, after_check=after_check)
             if s is None:
                 continue
-            per_class[c] = {"fold": round(s[0], 4), "call": round(s[1], 4)}
+            freq_row = {"fold": s[0], "call": s[1]}
+            per_class[c] = _merge_freq_ev(freq_row, ev_node.get(c))
         if per_class:
             out[str(size)] = per_class
     return out
@@ -109,16 +125,28 @@ def build_drill_row(spot_id: str, board: list, solver: PostflopSolver, exploitab
       - ip_root_after_oop_check: IP aposta ou passa, depois de OOP passar
       - oop_facing_bet_after_check: OOP responde a aposta da IP (que veio depois do check da OOP)
       - ip_facing_raise_after_check: IP responde a um raise da OOP (nesse ramo)
+
+    Cada mao em cada no vem no formato compacto [freq, ev, gap] (ver
+    _merge_freq_ev) -- ev/gap sao o valor calculado por
+    compute_action_evs(), reaproveitando o mesmo motor de
+    melhor-resposta ja validado por compute_exploitability().
     """
     strat_root = solver.average_strategy_root()
+    evs = solver.compute_action_evs()
     gto_nodes = {
         "bet_sizes": list(solver.bet_sizes),
-        "oop_root": {c: _round_strategy(s) for c, s in strat_root["oop"].items()},
-        "ip_root_after_oop_check": {c: _round_strategy(s) for c, s in strat_root["ip"].items()},
-        "ip_facing_bet": _facing_bet_by_size(solver, "oop", solver.classes_ip, after_check=False),
-        "oop_facing_raise": _facing_raise_by_size(solver, "oop", solver.classes_oop, after_check=False),
-        "oop_facing_bet_after_check": _facing_bet_by_size(solver, "ip", solver.classes_oop, after_check=True),
-        "ip_facing_raise_after_check": _facing_raise_by_size(solver, "ip", solver.classes_ip, after_check=True),
+        "oop_root": {c: _merge_freq_ev(s, evs.get("root", {}).get(c)) for c, s in strat_root["oop"].items()},
+        "ip_root_after_oop_check": {
+            c: _merge_freq_ev(s, evs.get("facing_check", {}).get(c)) for c, s in strat_root["ip"].items()
+        },
+        "ip_facing_bet": _facing_bet_by_size(solver, "oop", solver.classes_ip, False, evs, "facing_bet"),
+        "oop_facing_raise": _facing_raise_by_size(solver, "oop", solver.classes_oop, False, evs, "facing_raise"),
+        "oop_facing_bet_after_check": _facing_bet_by_size(
+            solver, "ip", solver.classes_oop, True, evs, "facing_bet_after_check",
+        ),
+        "ip_facing_raise_after_check": _facing_raise_by_size(
+            solver, "ip", solver.classes_ip, True, evs, "facing_raise_after_check",
+        ),
     }
 
     return {
