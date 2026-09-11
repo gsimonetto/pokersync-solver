@@ -145,7 +145,14 @@ def test_sanidade_3_seats():
     # exploitability muito maior, por causa do peso de reach duplicado)
     # que apontou pro bug original. Usa poucas iteracoes de best-response
     # (rapido, so' termometro -- nao e' o teste de precisao final).
-    br = solver.compute_exploitability(iterations=300, seed=1)
+    # policy_samples bem reduzido de proposito: a partir da correcao do
+    # vazamento de informacao (2026-09), compute_exploitability fixa a
+    # politica de cada classe de mao via reamostragem dos adversarios
+    # (ver engine/multiway_rfi.py) -- com 3+ seats isso envolve showdown
+    # multiway de verdade (Monte Carlo com carta real via treys), bem
+    # mais caro que o caso de 2 seats. Aqui so' precisamos de um
+    # termometro grosseiro, nao precisao.
+    br = solver.compute_exploitability(iterations=150, seed=1, policy_samples=3)
     print(f"  Exploitability por seat (Monte Carlo, termometro): {br}")
     br_values = list(br.values())
     br_max, br_min_abs = max(abs(v) for v in br_values), min(abs(v) for v in br_values)

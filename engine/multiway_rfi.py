@@ -80,6 +80,7 @@ class MultiwayRfiSolver:
         self.weights = {c: combo_count(c) for c in classes}
         total_w = sum(self.weights.values())
         self.weights_norm = {c: w / total_w for c, w in self.weights.items()}
+        self._weights_list = [self.weights_norm[c] for c in classes]
 
         self.R = open_size
         self.T = effective_stack or min(table_stacks[i] for i in seat_idx_in_table)
@@ -444,95 +445,266 @@ class MultiwayRfiSolver:
         all_seats = set(icm_a.keys()) | set(icm_b.keys())
         return {s: weight_a * icm_a.get(s, 0.0) + weight_b * icm_b.get(s, 0.0) for s in all_seats}
 
-    def best_response_value(self, br_seat, avg_strategy=None, iterations=1000, seed=123):
-        """Estima (via Monte Carlo) o quanto `br_seat` ganharia se jogasse
-        SEMPRE a ação ótima (maior ICM) em cada decisão dele, enquanto
-        todos os outros seats seguem `avg_strategy` (a média já
-        convergida). Diferente do motor heads-up (`rfi_jam.py`), aqui não
-        dá pra enumerar todas as combinações de mão exatamente -- com 4+
-        seats isso explode (169^4 combinações só pra 4 jogadores) -- por
-        isso a amostragem, igual já é feita no treino (`train`) e na
-        equity multiway (`_multiway_eq`).
+    # ---- best response SEM vazamento de informação (correção 2026-09) ----
+    #
+    # BUG anterior (ver tests/multiway_exploitability_2seat.py e o
+    # histórico do commit que documentou isso): a versão antiga de
+    # best_response_value decidia a melhor ação de `br_seat` olhando pra
+    # mão ESPECÍFICA sorteada do adversário NESSA amostra, em vez de
+    # calcular o valor esperado médio sobre a distribuição de mãos do
+    # adversário antes de fixar a decisão -- inflava o resultado em ~4%,
+    # de forma sistemática (vazamento estrutural, não ruído).
+    #
+    # Correção: pra cada decisão que pertence a `br_seat`, a ação é
+    # FIXADA por classe de mão de `br_seat` ANTES de qualquer avaliação
+    # final -- calculando a média de cada ação possível sobre MUITAS
+    # amostras dos OUTROS seats (a mão de `br_seat` fica fixa, os outros
+    # são resorteados a cada amostra), igual ao cuidado que
+    # rfi_jam.py::best_response_value já fazia (lá por enumeração exata,
+    # aqui por amostragem -- com 4+ seats, enumerar exatamente todas as
+    # combinações de mão dos adversários é inviável, mas ainda dá pra
+    # fazer a média SEM deixar `br_seat` espiar a amostra específica).
+    #
+    # Só o abridor (seat 0) decide duas vezes na mesma mão (abre/folda
+    # na raiz; se alguém jamma depois, responde call/fold em fase 2) --
+    # por isso a decisão mais profunda dele (fase 2) precisa ser fixada
+    # ANTES da raiz, senão a raiz "enxergaria" a fase 2 por baixo dos
+    # panos. Qualquer outro seat tem no máximo UMA decisão própria por
+    # mão (fase 1 OU responder em fase 2 -- nunca as duas, são ramos
+    # mutuamente exclusivos), então não tem essa dependência.
 
-        LIMITAÇÃO CONHECIDA (2026-09, ver
-        tests/multiway_exploitability_2seat.py): `_br_open_or_fold` /
-        `_br_fold_or_jam` / `_br_resolve_responders` decidem a MELHOR
-        ação de `br_seat` olhando pra mão ESPECÍFICA sorteada do
-        adversário nessa amostra, em vez de calcular o valor esperado
-        MÉDIO sobre a distribuição de mãos do adversário antes de fixar
-        a decisão (o cuidado que `rfi_jam.py::best_response_value`
-        documenta e faz certo: "o mais profundo precisa ser resolvido
-        primeiro e FIXADO antes de calcular a raiz, senão a raiz
-        enxergaria a carta do oponente por baixo dos panos"). Isso
-        infla sistematicamente o valor retornado (~4% a mais,
-        confirmado até com enumeração EXATA — não é ruído de
-        amostragem, é vazamento de informação estrutural). Corrigir
-        isso de verdade para N>=2 jogadores exige reescrever esses três
-        métodos (calcular a decisão mais profunda do próprio jogador
-        primeiro, média sobre a distribuição do adversário, FIXAR,
-        depois subir pro nível anterior) — não feito ainda.
-        `tests/multiway_exploitability_2seat.py` prova o problema e
-        oferece uma forma exata de medir exploitability só pro caso
-        degenerado de 2 jogadores sem ante (delega pro motor heads-up
-        já validado). NÃO usar o número deste método pra decisão de
-        produto (ex: "esse resultado de UTG/MP/HJ/CO está bom o
-        bastante?") até essa reescrita existir — ele é só um termômetro
-        aproximado e otimista demais, não uma medida confiável."""
-        if avg_strategy is None:
-            avg_strategy = self.average_strategy()
-        random.seed(seed)
-        classes_list = self.classes
-        weights_list = [self.weights_norm[c] for c in classes_list]
-        total = 0.0
-        for _ in range(iterations):
-            hands = {i: random.choices(classes_list, weights=weights_list, k=1)[0]
-                      for i in range(self.n_seats)}
-            icm = self._br_open_or_fold(br_seat, avg_strategy, hands)
-            total += icm.get(br_seat, 0.0)
-        return total / iterations
-
-    def compute_exploitability(self, avg_strategy=None, iterations=1000, seed=123):
-        """Best response de cada seat, um de cada vez (mesma convenção do
-        motor heads-up: soma das best responses, não uma diferença contra
-        o valor sob a média -- serve como termômetro de convergência
-        comparável entre runs, não como exploitability literal em $)."""
-        if avg_strategy is None:
-            avg_strategy = self.average_strategy()
-        return {
-            i: self.best_response_value(i, avg_strategy, iterations=iterations, seed=seed)
-            for i in range(self.n_seats)
-        }
-
-    def _br_open_or_fold(self, br_seat, avg, hands):
-        icm_fold = self._icm_fold_root(hands)
-        icm_open = self._br_fold_or_jam(1, br_seat, avg, hands)
-        if br_seat == 0:
-            return icm_open if icm_open.get(0, 0.0) > icm_fold.get(0, 0.0) else icm_fold
-        p_open = avg["phase1"][0][hands[0]]
-        return self._blend(icm_fold, icm_open, 1 - p_open, p_open)
-
-    def _br_fold_or_jam(self, seat_i, br_seat, avg, hands):
+    def _eval_fold_or_jam(self, seat_i, hands, avg):
+        """Como _play_fold_or_jam, mas sem efeito colateral (não mexe em
+        regret_sum/strategy_sum) e usando avg_strategy fixo em vez de
+        current_strategy() do CFR -- pura avaliação, todo mundo por
+        média (nenhum seat tratado como best-responder aqui)."""
         if seat_i >= self.n_seats:
             return self._terminal_all_fold(hands)
-        icm_fold = self._br_fold_or_jam(seat_i + 1, br_seat, avg, hands)
-        icm_jam = self._br_phase2(seat_i, br_seat, avg, hands)
-        if seat_i == br_seat:
-            return icm_jam if icm_jam.get(seat_i, 0.0) > icm_fold.get(seat_i, 0.0) else icm_fold
         p_jam = avg["phase1"][seat_i][hands[seat_i]]
+        icm_fold = self._eval_fold_or_jam(seat_i + 1, hands, avg)
+        icm_jam = self._eval_phase2(seat_i, hands, avg)
         return self._blend(icm_fold, icm_jam, 1 - p_jam, p_jam)
 
-    def _br_phase2(self, jammer, br_seat, avg, hands):
+    def _eval_phase2(self, jammer, hands, avg):
         responders = [i for i in range(self.n_seats) if i > jammer]
         responders.append(0)
-        return self._br_resolve_responders(jammer, responders, 0, {jammer}, br_seat, avg, hands)
+        return self._eval_resolve_responders(jammer, responders, 0, {jammer}, hands, avg)
 
-    def _br_resolve_responders(self, jammer, responders, idx, live_set, br_seat, avg, hands):
+    def _eval_resolve_responders(self, jammer, responders, idx, live_set, hands, avg):
         if idx >= len(responders):
             return self._showdown(live_set, hands)
         seat_i = responders[idx]
-        icm_fold = self._br_resolve_responders(jammer, responders, idx + 1, live_set, br_seat, avg, hands)
-        icm_call = self._br_resolve_responders(jammer, responders, idx + 1, live_set | {seat_i}, br_seat, avg, hands)
-        if seat_i == br_seat:
-            return icm_call if icm_call.get(seat_i, 0.0) > icm_fold.get(seat_i, 0.0) else icm_fold
         p_call = avg["phase2"][seat_i][jammer][hands[seat_i]]
+        icm_fold = self._eval_resolve_responders(jammer, responders, idx + 1, live_set, hands, avg)
+        icm_call = self._eval_resolve_responders(jammer, responders, idx + 1, live_set | {seat_i}, hands, avg)
         return self._blend(icm_fold, icm_call, 1 - p_call, p_call)
+
+    def _eval_resolve_responders_forced(self, jammer, responders, idx, live_set, hands, avg,
+                                         forced_seat, forced_action):
+        """Como _eval_resolve_responders, mas a decisão de `forced_seat`
+        (quando aparece como responder) é FORÇADA pra `forced_action`
+        (0=fold, 1=call) em vez de usar avg_strategy -- usado tanto pra
+        FIXAR a política de forced_seat (chamado com forced_action=0 e
+        =1 pra comparar) quanto na avaliação final (chamado com a ação
+        já fixada, olhando só a própria mão de forced_seat)."""
+        if idx >= len(responders):
+            return self._showdown(live_set, hands)
+        seat_i = responders[idx]
+        if seat_i == forced_seat:
+            next_live = live_set | {seat_i} if forced_action == 1 else live_set
+            return self._eval_resolve_responders_forced(
+                jammer, responders, idx + 1, next_live, hands, avg, forced_seat, forced_action
+            )
+        p_call = avg["phase2"][seat_i][jammer][hands[seat_i]]
+        icm_fold = self._eval_resolve_responders_forced(
+            jammer, responders, idx + 1, live_set, hands, avg, forced_seat, forced_action
+        )
+        icm_call = self._eval_resolve_responders_forced(
+            jammer, responders, idx + 1, live_set | {seat_i}, hands, avg, forced_seat, forced_action
+        )
+        return self._blend(icm_fold, icm_call, 1 - p_call, p_call)
+
+    def _sample_other_hands(self, fixed_seat, fixed_hand, rng):
+        hands = {fixed_seat: fixed_hand}
+        for i in range(self.n_seats):
+            if i != fixed_seat:
+                hands[i] = rng.choices(self.classes, weights=self._weights_list, k=1)[0]
+        return hands
+
+    def _fix_policy_phase1(self, br_seat, avg, samples, rng):
+        """Fixa fold-vs-jam de `br_seat` (br_seat >= 1) pra cada classe de
+        mão dele, SEM espiar a amostra dos adversários -- média sobre
+        `samples` sorteios independentes deles antes de decidir."""
+        policy = {}
+        for h in self.classes:
+            val_fold = 0.0
+            val_jam = 0.0
+            for _ in range(samples):
+                hands = self._sample_other_hands(br_seat, h, rng)
+                val_fold += self._eval_fold_or_jam(br_seat + 1, hands, avg).get(br_seat, 0.0)
+                val_jam += self._eval_phase2(br_seat, hands, avg).get(br_seat, 0.0)
+            policy[h] = 1 if val_jam > val_fold else 0
+        return policy
+
+    def _fix_policy_phase2(self, br_seat, jammer, avg, samples, rng):
+        """Fixa fold-vs-call de `br_seat` respondendo ao jam de `jammer`
+        (br_seat == 0, ou br_seat > jammer), por classe de mão. A mão do
+        jammer é ponderada pela probabilidade dele TER REALMENTE jammado
+        com ela (posterior condicionado em "jammer jammou", igual
+        rfi_jam.py faz por enumeração exata -- aqui via peso de
+        importância, já que enumerar exatamente todas as mãos dos
+        adversários explode com muitos seats)."""
+        policy = {}
+        for h in self.classes:
+            w_fold, w_call, w_total = 0.0, 0.0, 0.0
+            for _ in range(samples):
+                hands = self._sample_other_hands(br_seat, h, rng)
+                w = avg["phase1"][jammer][hands[jammer]]
+                if w <= 0:
+                    continue
+                responders = [i for i in range(self.n_seats) if i > jammer]
+                responders.append(0)
+                icm_fold = self._eval_resolve_responders_forced(
+                    jammer, responders, 0, {jammer}, hands, avg, br_seat, 0
+                )
+                icm_call = self._eval_resolve_responders_forced(
+                    jammer, responders, 0, {jammer}, hands, avg, br_seat, 1
+                )
+                w_fold += w * icm_fold.get(br_seat, 0.0)
+                w_call += w * icm_call.get(br_seat, 0.0)
+                w_total += w
+            policy[h] = 1 if (w_total > 0 and w_call > w_fold) else 0
+        return policy
+
+    def _fix_policy_root_seat0(self, avg, phase2_policy, samples, rng):
+        """Fixa abrir-vs-foldar do abridor (seat 0) na raiz, USANDO a
+        política de fase 2 dele já fixada antes (ver docstring da seção)
+        -- sem isso, a raiz reaproveitaria a versão com vazamento pra
+        avaliar o que acontece quando alguém jamma depois de abrir."""
+        val_fold_const = self._icm_fold_root({}).get(0, 0.0)
+        policy = {}
+        for h in self.classes:
+            val_open = 0.0
+            for _ in range(samples):
+                hands = self._sample_other_hands(0, h, rng)
+                val_open += self._eval_fold_or_jam_seat0_fixed(1, hands, avg, phase2_policy).get(0, 0.0)
+            policy[h] = 1 if (val_open / samples) > val_fold_const else 0
+        return policy
+
+    def _eval_fold_or_jam_seat0_fixed(self, seat_i, hands, avg, phase2_policy):
+        """Como _eval_fold_or_jam, mas quando a ação chega em fase 2, o
+        abridor (seat 0) usa a política JÁ FIXADA (`phase2_policy`) em
+        vez de avg_strategy -- os demais seats continuam por média."""
+        if seat_i >= self.n_seats:
+            return self._terminal_all_fold(hands)
+        p_jam = avg["phase1"][seat_i][hands[seat_i]]
+        icm_fold = self._eval_fold_or_jam_seat0_fixed(seat_i + 1, hands, avg, phase2_policy)
+        responders = [i for i in range(self.n_seats) if i > seat_i]
+        responders.append(0)
+        action0 = phase2_policy[seat_i][hands[0]]
+        icm_jam = self._eval_resolve_responders_forced(seat_i, responders, 0, {seat_i}, hands, avg, 0, action0)
+        return self._blend(icm_fold, icm_jam, 1 - p_jam, p_jam)
+
+    def _fix_br_policy(self, br_seat, avg, samples, rng):
+        if br_seat == 0:
+            phase2_policy = {
+                jammer: self._fix_policy_phase2(0, jammer, avg, samples, rng)
+                for jammer in range(1, self.n_seats)
+            }
+            root_policy = self._fix_policy_root_seat0(avg, phase2_policy, samples, rng)
+            return {"root": root_policy, "phase2": phase2_policy}
+        phase1_policy = self._fix_policy_phase1(br_seat, avg, samples, rng)
+        phase2_policy = {
+            jammer: self._fix_policy_phase2(br_seat, jammer, avg, samples, rng)
+            for jammer in range(1, br_seat)
+        }
+        return {"phase1": phase1_policy, "phase2": phase2_policy}
+
+    def _eval_root_full(self, hands, avg, br_seat, policy):
+        if br_seat == 0:
+            if policy["root"][hands[0]] == 0:
+                return self._icm_fold_root(hands)
+            return self._eval_fold_or_jam_full(1, hands, avg, br_seat, policy)
+        p_open = avg["phase1"][0][hands[0]]
+        icm_fold = self._icm_fold_root(hands)
+        icm_open = self._eval_fold_or_jam_full(1, hands, avg, br_seat, policy)
+        return self._blend(icm_fold, icm_open, 1 - p_open, p_open)
+
+    def _eval_fold_or_jam_full(self, seat_i, hands, avg, br_seat, policy):
+        if seat_i >= self.n_seats:
+            return self._terminal_all_fold(hands)
+        if seat_i == br_seat:
+            if policy["phase1"][hands[seat_i]] == 0:
+                return self._eval_fold_or_jam_full(seat_i + 1, hands, avg, br_seat, policy)
+            return self._eval_phase2_full(seat_i, hands, avg, br_seat, policy)
+        p_jam = avg["phase1"][seat_i][hands[seat_i]]
+        icm_fold = self._eval_fold_or_jam_full(seat_i + 1, hands, avg, br_seat, policy)
+        icm_jam = self._eval_phase2_full(seat_i, hands, avg, br_seat, policy)
+        return self._blend(icm_fold, icm_jam, 1 - p_jam, p_jam)
+
+    def _eval_phase2_full(self, jammer, hands, avg, br_seat, policy):
+        responders = [i for i in range(self.n_seats) if i > jammer]
+        responders.append(0)
+        if br_seat in responders and (br_seat == 0 or br_seat > jammer):
+            action = policy["phase2"][jammer][hands[br_seat]]
+            return self._eval_resolve_responders_forced(jammer, responders, 0, {jammer}, hands, avg, br_seat, action)
+        return self._eval_resolve_responders(jammer, responders, 0, {jammer}, hands, avg)
+
+    def best_response_value(self, br_seat, avg_strategy=None, iterations=1000, seed=123, policy_samples=50):
+        """Quanto `br_seat` ganharia jogando a MELHOR ação em cada decisão
+        própria (fixada sem vazamento -- ver `_fix_br_policy` e a seção
+        acima), enquanto todos os outros seats seguem `avg_strategy`.
+
+        Duas amostragens diferentes, de propósito:
+          - `policy_samples`: quantas vezes resorteamos os ADVERSÁRIOS
+            (mão de br_seat fixa) pra decidir a política de br_seat por
+            classe -- roda uma vez POR CLASSE de mão de br_seat (até
+            169 vezes) e por decisão própria dele (fase 1 + até N-1
+            respostas de fase 2), então o custo total escala com
+            N_classes × N_decisões × policy_samples.
+          - `iterations`: quantas mãos completas (todos os seats,
+            incluindo br_seat) sorteamos pra avaliar o valor médio final,
+            já com a política de br_seat fixada e sem risco de vazamento
+            (a política não muda mais por amostra) -- bem mais barato,
+            não escala com N_classes.
+
+        CUSTO (2026-09, medido): com 2 seats, o showdown usa a tabela
+        de equity pré-computada (`equity_matrix`) — rápido, `policy_samples`
+        alto (100s) não pesa. Com 3+ seats, cada showdown chama
+        `multiway_equity()` (simulação de carta real via `treys`) — bem
+        mais caro, e NÃO é cacheável aqui (cada amostra sorteia mãos
+        novas dos adversários de propósito, pra não vazar informação).
+        Medido: 3 seats, `policy_samples=10` (bem menor que o default)
+        levou ~90s pra `compute_exploitability()` inteiro (soma dos 3
+        seats). Escala com o número de seats (mais responders em fase
+        2, mais jammers possíveis) — pra 8 seats (UTG), espere minutos
+        a dezenas de minutos. Não é bug, é o custo real de medir isso
+        sem vazar informação com muitos jogadores — ajuste
+        `policy_samples`/`iterations` pra baixo se só precisar de um
+        termômetro grosseiro (ver tests/multiway_exploitability_2seat.py
+        pra exemplos calibrados)."""
+        if avg_strategy is None:
+            avg_strategy = self.average_strategy()
+        rng = random.Random(seed)
+        policy = self._fix_br_policy(br_seat, avg_strategy, policy_samples, rng)
+        total = 0.0
+        for _ in range(iterations):
+            hands = {i: rng.choices(self.classes, weights=self._weights_list, k=1)[0]
+                      for i in range(self.n_seats)}
+            icm = self._eval_root_full(hands, avg_strategy, br_seat, policy)
+            total += icm.get(br_seat, 0.0)
+        return total / iterations
+
+    def compute_exploitability(self, avg_strategy=None, iterations=1000, seed=123, policy_samples=50):
+        """Best response de cada seat, um de cada vez (mesma convenção do
+        motor heads-up: soma das best responses, não uma diferença contra
+        o valor sob a média -- serve como termômetro de convergência
+        comparável entre runs, não como exploitability literal em $).
+        Ver aviso de custo em `best_response_value` -- com 3+ seats,
+        rode isso separado do treino (não em loop apertado)."""
+        if avg_strategy is None:
+            avg_strategy = self.average_strategy()
+        return {
+            i: self.best_response_value(i, avg_strategy, iterations=iterations, seed=seed, policy_samples=policy_samples)
+            for i in range(self.n_seats)
+        }
