@@ -158,19 +158,50 @@ longo do tempo pra virar Net Expected Profit / EV ROI%).
   máximo 1 jogador pulado (BTN vs BB). **Resolvido via motor
   multiway** (`engine/multiway_rfi.py`), ver abaixo.
 - ✅/⏳ **Motor multiway (N jogadores)** — arquitetura pronta.
-  Validado estruturalmente: bate com o motor heads-up no caso
-  degenerado de 2 seats, mãos claras (AA/AKo/KK/QQ) convergem
-  corretamente perto de 100%. Achei e corrigi 1 bug real durante essa
-  validação (o abridor estava usando o mecanismo de decisão errado —
-  fold-ou-jam em vez de fold-ou-abrir). **Não tem o mesmo nível de
-  validação de exploitability rigorosa que o motor heads-up** (best
-  response completo pra N jogadores não foi implementado — é mais
-  complexo que o caso de 2 jogadores). Mãos de fronteira podem
-  oscilar bastante entre rodadas (mesmo fenômeno já documentado no
-  heads-up, não é bug). É lento por natureza (equity multiway via
-  Monte Carlo) — pensado pra rodar OFFLINE, no seu PC, por
-  horas/dias/semanas, não no meu sandbox. Ver
-  `run_offline_multiway.py` (tem checkpoint automático).
+  **(2026-09) Bug real corrigido**: o treino (`train()`/`_play_*`) não
+  pesava `regret_sum` pela probabilidade dos jogadores anteriores
+  terem realmente escolhido o caminho até aquele infoset
+  ("reach probability"), só o motor heads-up fazia isso certo — no
+  caso degenerado de 2 jogadores, isso fazia a estratégia aprendida
+  divergir bastante da do motor heads-up (que deveria ser idêntica).
+  Corrigido e **provado exato**: com a mesma sequência de mãos nos
+  dois motores (sem ruído de amostragem envolvido), a estratégia bate
+  bit-a-bit em todos os infosets, até depois de 60 mil mãos — ver
+  `tests/multiway_rfi.py`. Antes desse bug ser corrigido, também não
+  existia NENHUM teste automatizado pra este arquivo (era o único
+  motor do projeto nessa situação, rodando sem essa rede de segurança
+  por dias no PC do usuário).
+  Achei e corrigi 1 bug mais antigo durante essa mesma validação (o
+  abridor estava usando o mecanismo de decisão errado — fold-ou-jam em
+  vez de fold-ou-abrir).
+  **Limitação NOVA encontrada (ainda não corrigida)**: a MEDIÇÃO de
+  exploitability (`best_response_value`/`compute_exploitability`) tem
+  um vazamento de informação diferente do bug de treino acima — ao
+  decidir a melhor ação do jogador sendo medido, ela olha a mão
+  específica sorteada do ADVERSÁRIO na amostra em vez de calcular o
+  valor médio sobre a distribuição de mãos dele antes de fixar a
+  decisão (o cuidado que `rfi_jam.py` documenta e faz certo). Isso
+  infla o número em ~4%, de forma sistemática (confirmado até com
+  enumeração exata, sem nenhuma amostragem) — não é a mesma coisa que
+  "mãos de fronteira oscilam" (fenômeno esperado, documentado abaixo);
+  é viés estrutural. `tests/multiway_exploitability_2seat.py` prova o
+  problema e mede exploitability correta só pro caso degenerado de 2
+  jogadores sem ante (delegando pro motor heads-up já validado, sem
+  reescrever a matemática). Corrigir isso pra N>=2 de verdade é
+  reescrever `_br_open_or_fold`/`_br_fold_or_jam`/`_br_resolve_responders`
+  do zero — não feito ainda. **Não confiar no número de
+  `compute_exploitability()` pra decisão de produto** (ex: "esse
+  resultado de UTG/MP/HJ/CO está bom o bastante?") até essa reescrita
+  existir.
+  Mãos de fronteira podem oscilar bastante entre rodadas (mesmo
+  fenômeno já documentado no heads-up, não é bug). É lento por
+  natureza (equity multiway via Monte Carlo) — pensado pra rodar
+  OFFLINE, no seu PC, por horas/dias/semanas, não no meu sandbox. Ver
+  `run_offline_multiway.py`/`run_offline_all_positions.py` (tem
+  checkpoint automático). **Se você já rodou algo com este motor antes
+  de 2026-09, precisa refazer do zero** (apague `checkpoint_*.pkl`,
+  `resultado_*.pkl` e `data/equity_matrix_cache.pkl`) — o treino usava
+  a lógica com o bug de reach probability acima.
 - ⏳ 3-bet "de verdade" (não all-in) pré-flop — não iniciado. A árvore
   de RFI atual trata qualquer resposta a um raise como shove (correto
   pra stack curto/médio, não serve pra stack profundo).

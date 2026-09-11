@@ -41,6 +41,9 @@ jobs:
       - name: RFI multiway — regressão contra motor heads-up (lockstep) + sanidade
         run: python tests/multiway_rfi.py
 
+      - name: RFI multiway — prova do vazamento em compute_exploitability + medição exata (2 seats)
+        run: python tests/multiway_exploitability_2seat.py
+
       - name: Push/Fold (chip EV puro)
         run: python tests/pushfold.py
 
