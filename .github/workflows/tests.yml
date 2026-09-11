@@ -40,3 +40,15 @@ jobs:
 
       - name: RFI multiway — regressão contra motor heads-up (lockstep) + sanidade
         run: python tests/multiway_rfi.py
+
+      - name: Push/Fold (chip EV puro)
+        run: python tests/pushfold.py
+
+      - name: Push/Fold com ICM
+        run: python tests/pushfold_icm.py
+
+      - name: cEV/ICM de mão jogada (heads-up)
+        run: python tests/hand_cev.py
+
+      - name: cEV/ICM de mão jogada (multiway)
+        run: python tests/hand_cev_multiway.py
