@@ -78,7 +78,7 @@ def main():
     while done_iterations < TOTAL_ITERATIONS:
         batch = min(CHECKPOINT_EVERY, TOTAL_ITERATIONS - done_iterations)
         t0 = time.time()
-        solver.train(iterations=batch, seed=done_iterations + 1)
+        solver.train(iterations=batch, seed=done_iterations + 1, start_t=done_iterations + 1)
         done_iterations += batch
         dt = time.time() - t0
 

@@ -82,10 +82,15 @@ def test_lockstep_2_seats_reproduz_heads_up():
     hu = RfiJamSolver(sb_idx=0, bb_idx=1, table_stacks=TABLE_STACKS, payouts=PAYOUTS,
                        equity_matrix=_EQUITY_MATRIX, classes=_CLASSES, open_size=2.2,
                        effective_stack=25, opener_post=0.5, defender_post=1.0, dead_money=0.0)
+    # use_cfr_plus=False: o motor heads-up (rfi_jam.py) usa CFR classico
+    # (sem piso de regret nem media ponderada por iteracao) -- os dois só
+    # reproduzem o MESMO resultado em lockstep se rodarem o MESMO
+    # algoritmo de regret matching. O CFR+ (default do multiway em
+    # producao) e' testado separadamente na sanidade de 3 seats abaixo.
     mw = MultiwayRfiSolver(seat_names=["opener", "BB"], seat_idx_in_table=[0, 1],
                             seat_posts=[0.5, 1.0], table_stacks=TABLE_STACKS, payouts=PAYOUTS,
                             equity_matrix=_EQUITY_MATRIX, classes=_CLASSES, open_size=2.2,
-                            effective_stack=25)
+                            effective_stack=25, use_cfr_plus=False)
 
     random.seed(7)
     weights = [hu.weights_norm[c] for c in _CLASSES]

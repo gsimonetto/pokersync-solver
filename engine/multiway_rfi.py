@@ -37,6 +37,22 @@ class InfoSet:
         self.regret_sum = [0.0] * n_actions
         self.strategy_sum = [0.0] * n_actions
 
+    def update_regret(self, regret):
+        """CFR+: o arrependimento acumulado eh sempre travado em >= 0 logo
+        apos cada atualizacao (nao so' na hora de montar a estrategia
+        atual). O CFR classico deixava regret_sum acumular livremente
+        negativo -- se uma acao tomasse um "azar" grande de amostragem no
+        comeco do treino, o placar dela podia ficar tao negativo que ela
+        quase nunca mais era escolhida, e levava MUITAS iteracoes pra se
+        recuperar (as vezes nem 5 milhoes bastavam). Travar em zero a
+        cada passo faz a acao voltar a competir assim que tiver uma unica
+        iteracao positiva, em vez de precisar "pagar a divida" acumulada
+        primeiro. `regret` aqui ja vem pesado por opp_reach (ver
+        _play_fold_or_jam/_resolve_responders) -- o piso e' aplicado
+        DEPOIS de somar, nao antes."""
+        for i in range(self.n_actions):
+            self.regret_sum[i] = max(0.0, self.regret_sum[i] + regret[i])
+
     def current_strategy(self):
         positive = [max(r, 0.0) for r in self.regret_sum]
         total = sum(positive)
@@ -54,7 +70,8 @@ class InfoSet:
 class MultiwayRfiSolver:
     def __init__(self, seat_names, seat_idx_in_table, seat_posts, table_stacks, payouts,
                  equity_matrix, classes, open_size=2.2, effective_stack=None,
-                 equity_cache=None, ante_pool=0.0, use_icm: bool = True):
+                 equity_cache=None, ante_pool=0.0, use_icm: bool = True,
+                 use_cfr_plus: bool = True):
         """
         seat_names: ['opener','MP','CO','BTN','SB','BB'] -- ordem de acao.
         seat_idx_in_table: indice de cada seat dentro de table_stacks/payouts.
@@ -68,6 +85,17 @@ class MultiwayRfiSolver:
                    abridor so decidiu nao abrir, a mao continua sem ser
                    modelada, entao o ante ainda vai ser ganho por
                    alguem fora do escopo deste solver).
+        use_cfr_plus: liga o CFR+ (piso de regret em zero a cada update +
+                    media da estrategia ponderada por iteracao -- ver
+                    InfoSet.update_regret e o comentario de `t` em
+                    _play_open_or_fold). Default True (converge mais
+                    rapido e evita maos "travadas" numa decisao ruim por
+                    azar de amostragem cedo no treino). Existe a opcao de
+                    desligar (False = CFR classico, identico ao motor
+                    heads-up rfi_jam.py) especificamente pra comparacoes
+                    tipo tests/multiway_rfi.py::test_lockstep -- os dois
+                    motores so' reproduzem EXATAMENTE o mesmo resultado
+                    se usarem o MESMO algoritmo de regret matching.
         """
         self.seat_names = seat_names
         self.n_seats = len(seat_names)
@@ -76,6 +104,7 @@ class MultiwayRfiSolver:
         self.table_stacks = list(table_stacks)
         self.payouts = payouts
         self.use_icm = use_icm
+        self.use_cfr_plus = use_cfr_plus
         if use_icm and not payouts:
             raise ValueError("payouts vazio/None -- sem payouts nao ha ICM pra calcular (use_icm=False pra chipEV puro)")
         self.equity_matrix = equity_matrix  # pairwise, usado só pra referência/compat
@@ -128,7 +157,17 @@ class MultiwayRfiSolver:
         (use_icm=False, "chipEV puro" -- mesmo espirito de
         RfiJamSolver._icm_pair, unico ponto de acesso a ICM no motor
         multiway). Nome do metodo mantido (nao "_utility") pra nao
-        quebrar nenhum chamador existente."""
+        quebrar nenhum chamador existente.
+
+        No modo ICM, a entrada devolvida cobre TODOS os n_seats, nao so'
+        os presentes em stack_deltas -- quem nao aparece ali (stack nao
+        mudou, ex: fold sem blind pago) tem ICM equity normal (nao-zero),
+        e todo consumidor usa `.get(seat, 0.0)`. Devolver so' os seats de
+        stack_deltas fazia esse equity real virar SILENCIOSAMENTE zero em
+        qualquer regret/best-response calculado a partir dali -- inflava
+        a frequencia de jam de seats sem blind (fold parecia inutil).
+        No modo chipEV (use_icm=False) isso nao se aplica: delta ausente
+        e' corretamente 0 fichas (omissao = 0 e' o valor certo ali)."""
         if not self.use_icm:
             return dict(stack_deltas)
         key = tuple(sorted(stack_deltas.items()))
@@ -139,13 +178,44 @@ class MultiwayRfiSolver:
             table_i = self.seat_idx_in_table[seat]
             stacks[table_i] = max(0.0, stacks[table_i] + delta)
         eq = icm_equity(stacks, self.payouts)
-        result = {seat: eq[self.seat_idx_in_table[seat]] for seat in stack_deltas}
+        result = {seat: eq[self.seat_idx_in_table[seat]] for seat in range(self.n_seats)}
         self._icm_cache[key] = result
         return result
 
-    def _multiway_eq(self, seat_hand_pairs, iterations=150):
+    # Tamanho de cada lote de simulacao (novo ou de refinamento) e teto de
+    # amostras acumuladas por combinacao -- ver docstring de _multiway_eq.
+    EQUITY_BATCH = 150
+    EQUITY_MAX_SAMPLES = 2000
+
+    def _multiway_eq(self, seat_hand_pairs):
         """seat_hand_pairs: lista de (seat_idx, hand_class). Retorna dict
         seat_idx -> equity.
+
+        Refinamento progressivo com teto: o resultado de cada combinacao
+        de maos era calculado UMA VEZ (150 simulacoes Monte Carlo) e
+        ficava congelado pra sempre em self._equity_cache, mesmo que
+        aquela MESMA combinacao aparecesse de novo centenas de vezes
+        durante o treino (e' exatamente pra aproveitar essas repeticoes
+        que o cache existe). Com 150 simulacoes, o desvio-padrao medido
+        empiricamente pra uma equity de 3-way ficou em ~0.04 (4 pontos
+        percentuais) -- um erro FIXO desse tamanho, congelado pra sempre,
+        e' o suficiente pra fazer o CFR aprender a decisao errada pra
+        maos especificas mesmo depois de milhoes de iteracoes (nao e'
+        ruido que se cancela com mais treino, ja que e' sempre o mesmo
+        numero errado reusado). Simplesmente multiplicar `iterations` de
+        uma vez (testado com 1000) resolve a precisao mas custa caro
+        demais (~7x mais lento no treino todo), inclusive em combinacoes
+        raras que quase nao importam.
+
+        Fix: a cada vez que uma combinacao (nova ou ja' vista) aparece,
+        roda mais um lote de EQUITY_BATCH simulacoes e funde com a media
+        acumulada (media ponderada pelo numero de amostras de cada lado)
+        -- ate' acumular EQUITY_MAX_SAMPLES no total, depois disso so'
+        reaproveita sem gastar mais (desvio-padrao cai pra ~0.012-0.015
+        nesse ponto). Combinacoes raras ficam baratas por natureza (nunca
+        chegam perto do teto); combinacoes frequentes (que mais pesam no
+        resultado final) ficam cada vez mais precisas conforme sao
+        revisitadas.
 
         Cache chaveado pelo MULTISET de classes (ignorando qual seat
         tem qual mão) -- a equity de cada classe so depende de QUAIS
@@ -159,11 +229,23 @@ class MultiwayRfiSolver:
         order = sorted(range(len(hands)), key=lambda i: hands[i])
         sorted_hands = tuple(hands[i] for i in order)
 
-        if sorted_hands in self._equity_cache:
-            sorted_eqs = self._equity_cache[sorted_hands]
+        cached = self._equity_cache.get(sorted_hands)
+        cached_eqs, cached_n = cached if cached is not None else (None, 0)
+
+        if cached_n >= self.EQUITY_MAX_SAMPLES:
+            sorted_eqs = cached_eqs
         else:
-            sorted_eqs = multiway_equity(list(sorted_hands), iterations=iterations)
-            self._equity_cache[sorted_hands] = sorted_eqs
+            fresh_eqs = multiway_equity(list(sorted_hands), iterations=self.EQUITY_BATCH)
+            if cached_eqs is None:
+                sorted_eqs = fresh_eqs
+                new_n = self.EQUITY_BATCH
+            else:
+                new_n = cached_n + self.EQUITY_BATCH
+                sorted_eqs = [
+                    (cached_eqs[i] * cached_n + fresh_eqs[i] * self.EQUITY_BATCH) / new_n
+                    for i in range(len(fresh_eqs))
+                ]
+            self._equity_cache[sorted_hands] = (sorted_eqs, new_n)
 
         # remonta na ordem original dos seats (desfaz o sort)
         eqs = [0.0] * len(hands)
@@ -171,14 +253,18 @@ class MultiwayRfiSolver:
             eqs[orig_i] = sorted_eqs[pos]
         return dict(zip(seats, eqs))
 
-    def train(self, iterations=500_000, seed=42):
+    def train(self, iterations=500_000, seed=42, start_t=1):
+        """start_t: numero da primeira iteracao deste lote, pra continuar
+        corretamente a media ponderada por iteracao entre lotes/
+        checkpoints (CFR+ "linear averaging" -- ver comentario em
+        _play_open_or_fold sobre por que strategy_sum e' pesado por t)."""
         random.seed(seed)
         classes_list = self.classes
         weights_list = [self.weights_norm[c] for c in classes_list]
-        for _ in range(iterations):
+        for t in range(start_t, start_t + iterations):
             hands = {i: random.choices(classes_list, weights=weights_list, k=1)[0]
                       for i in range(self.n_seats)}
-            self._play_open_or_fold(hands)
+            self._play_open_or_fold(hands, t)
 
     # ---- reach probability (correcao 2026-09) ------------------------
     #
@@ -237,7 +323,22 @@ class MultiwayRfiSolver:
                 p *= r
         return p
 
-    def _play_open_or_fold(self, hands):
+    def _update_regret(self, infoset, regret):
+        """Aplica o update de regret no InfoSet, com ou sem o piso do
+        CFR+ dependendo de self.use_cfr_plus (ver __init__)."""
+        if self.use_cfr_plus:
+            infoset.update_regret(regret)
+        else:
+            infoset.regret_sum[0] += regret[0]
+            infoset.regret_sum[1] += regret[1]
+
+    def _t_weight(self, t):
+        """Peso de iteracao pra media da estrategia (CFR+ linear
+        averaging) -- so' se aplica quando use_cfr_plus esta ligado,
+        senao a media classica (peso igual pra todas as iteracoes)."""
+        return t if self.use_cfr_plus else 1
+
+    def _play_open_or_fold(self, hands, t=1):
         """Decisao do ABRIDOR (seat 0): fold ou abrir (nao e jam --
         e um raise pequeno, R, igual o motor heads-up). So depois de
         abrir e que os demais seats entram na sequencia fold-ou-jam.
@@ -245,7 +346,10 @@ class MultiwayRfiSolver:
         E' o unico infoset onde ninguem mais agiu antes -- ninguem tem
         reach reduzida ainda, entao o regret_sum de seat 0 aqui nao
         precisa de peso nenhum (equivalente a opp_reach=1.0, mesma
-        convencao de rfi_jam.py: p_bb comeca em 1.0 no _node_root)."""
+        convencao de rfi_jam.py: p_bb comeca em 1.0 no _node_root).
+
+        t: numero da iteracao atual (1-based) -- CFR+ "linear averaging"
+        (ver comentario detalhado no update de strategy_sum abaixo)."""
         infoset = self.phase1[0][hands[0]]
         strat = infoset.current_strategy()
 
@@ -255,7 +359,7 @@ class MultiwayRfiSolver:
         # mais adiante (fase 2), e conta normalmente como "reach de um
         # jogador anterior" pro regret de qualquer outro seat.
         own_reach = {0: strat[1]}
-        icm_open = self._play_fold_or_jam(1, hands, own_reach)
+        icm_open = self._play_fold_or_jam(1, hands, own_reach, t)
 
         node_val = {}
         all_seats = set(icm_fold.keys()) | set(icm_open.keys())
@@ -264,10 +368,18 @@ class MultiwayRfiSolver:
 
         regret = [icm_fold.get(0, 0.0) - node_val.get(0, 0.0),
                   icm_open.get(0, 0.0) - node_val.get(0, 0.0)]
-        infoset.regret_sum[0] += regret[0]
-        infoset.regret_sum[1] += regret[1]
-        infoset.strategy_sum[0] += strat[0]
-        infoset.strategy_sum[1] += strat[1]
+        self._update_regret(infoset, regret)
+        # CFR+ "linear averaging": multiplica a contribuicao de cada
+        # iteracao pelo numero dela (t), em vez de dar peso igual pra
+        # todas. Sem isso, uma mao que jogou mal nas primeiras iteracoes
+        # (antes do regret ainda ter convergido) carrega esse "estrago"
+        # com peso IGUAL ao das iteracoes finais (ja bem mais precisas)
+        # na media final -- e' o comportamento que CFR+ pressupoe pra
+        # convergir rapido (o piso de regret sozinho nao basta se a
+        # media continuar arrastando o comeco ruim do treino).
+        tw = self._t_weight(t)
+        infoset.strategy_sum[0] += tw * strat[0]
+        infoset.strategy_sum[1] += tw * strat[1]
 
         return node_val
 
@@ -285,7 +397,7 @@ class MultiwayRfiSolver:
         deltas[0] = total_won
         return self._icm(deltas)
 
-    def _play_fold_or_jam(self, seat_i, hands, own_reach):
+    def _play_fold_or_jam(self, seat_i, hands, own_reach, t=1):
         """Decisao de cada seat DEPOIS do abridor (seat_i >= 1): fold
         ou jam (all-in), quando a acao chega nele (todos antes dele
         ja foldaram, por construcao -- essa funcao so e chamada na
@@ -309,8 +421,8 @@ class MultiwayRfiSolver:
         reach_fold = {**own_reach, seat_i: own_reach.get(seat_i, 1.0) * strat[0]}
         reach_jam = {**own_reach, seat_i: own_reach.get(seat_i, 1.0) * strat[1]}
 
-        icm_fold = self._play_fold_or_jam(seat_i + 1, hands, reach_fold)
-        icm_jam = self._play_phase2(jammer=seat_i, hands=hands, own_reach=reach_jam)
+        icm_fold = self._play_fold_or_jam(seat_i + 1, hands, reach_fold, t)
+        icm_jam = self._play_phase2(jammer=seat_i, hands=hands, own_reach=reach_jam, t=t)
 
         node_val = {}
         all_seats = set(icm_fold.keys()) | set(icm_jam.keys())
@@ -319,14 +431,14 @@ class MultiwayRfiSolver:
 
         regret = [icm_fold.get(seat_i, 0.0) - node_val.get(seat_i, 0.0),
                   icm_jam.get(seat_i, 0.0) - node_val.get(seat_i, 0.0)]
-        infoset.regret_sum[0] += opp_reach * regret[0]
-        infoset.regret_sum[1] += opp_reach * regret[1]
-        infoset.strategy_sum[0] += strat[0]
-        infoset.strategy_sum[1] += strat[1]
+        self._update_regret(infoset, [opp_reach * regret[0], opp_reach * regret[1]])
+        tw = self._t_weight(t)
+        infoset.strategy_sum[0] += tw * strat[0]
+        infoset.strategy_sum[1] += tw * strat[1]
 
         return node_val
 
-    def _play_phase2(self, jammer, hands, own_reach):
+    def _play_phase2(self, jammer, hands, own_reach, t=1):
         """Todos os seats DEPOIS do jammer que ainda nao agiram, em
         ordem, decidem fold/call; no final o abridor (seat 0, que
         sempre abriu -- nunca chega aqui tendo foldado, isso ja e
@@ -334,9 +446,9 @@ class MultiwayRfiSolver:
         responders = [i for i in range(self.n_seats) if i > jammer]
         responders.append(0)  # abridor sempre responde (sempre abriu antes)
 
-        return self._resolve_responders(jammer, responders, 0, {jammer}, hands, own_reach)
+        return self._resolve_responders(jammer, responders, 0, {jammer}, hands, own_reach, t)
 
-    def _resolve_responders(self, jammer, responders, idx, live_set, hands, own_reach):
+    def _resolve_responders(self, jammer, responders, idx, live_set, hands, own_reach, t=1):
         if idx >= len(responders):
             return self._showdown(live_set, hands)
 
@@ -352,8 +464,8 @@ class MultiwayRfiSolver:
         reach_fold = {**own_reach, seat_i: own_weight * strat[0]}
         reach_call = {**own_reach, seat_i: own_weight * strat[1]}
 
-        icm_fold = self._resolve_responders(jammer, responders, idx + 1, live_set, hands, reach_fold)
-        icm_call = self._resolve_responders(jammer, responders, idx + 1, live_set | {seat_i}, hands, reach_call)
+        icm_fold = self._resolve_responders(jammer, responders, idx + 1, live_set, hands, reach_fold, t)
+        icm_call = self._resolve_responders(jammer, responders, idx + 1, live_set | {seat_i}, hands, reach_call, t)
 
         node_val = {}
         all_seats = set(icm_fold.keys()) | set(icm_call.keys())
@@ -362,8 +474,7 @@ class MultiwayRfiSolver:
 
         regret = [icm_fold.get(seat_i, 0.0) - node_val.get(seat_i, 0.0),
                   icm_call.get(seat_i, 0.0) - node_val.get(seat_i, 0.0)]
-        infoset.regret_sum[0] += opp_reach * regret[0]
-        infoset.regret_sum[1] += opp_reach * regret[1]
+        self._update_regret(infoset, [opp_reach * regret[0], opp_reach * regret[1]])
         # A media de estrategia (strategy_sum) do CFR precisa ser pesada
         # pela probabilidade do PROPRIO jogador ter chegado ate essa ficha
         # (formula padrao de "average strategy" do CFR: soma de
@@ -376,8 +487,11 @@ class MultiwayRfiSolver:
         # dificilmente abriria -- e' o que estava inflando a
         # exploitability do CO bem acima dos outros seats, mesmo depois
         # de separar a decisao por jammer.
-        infoset.strategy_sum[0] += own_weight * strat[0]
-        infoset.strategy_sum[1] += own_weight * strat[1]
+        # t: CFR+ "linear averaging" (ver _play_open_or_fold), combinado
+        # com own_weight (peso de reach do proprio jogador, ja existente).
+        tw = self._t_weight(t)
+        infoset.strategy_sum[0] += tw * own_weight * strat[0]
+        infoset.strategy_sum[1] += tw * own_weight * strat[1]
 
         return node_val
 
@@ -718,3 +832,48 @@ class MultiwayRfiSolver:
             i: self.best_response_value(i, avg_strategy, iterations=iterations, seed=seed, policy_samples=policy_samples)
             for i in range(self.n_seats)
         }
+
+    def check_opener_convergence(self, avg_strategy=None, sample_hands=None,
+                                  iterations=25, gap_threshold=0.3, seed=99):
+        """Checagem de sanidade OBRIGATORIA antes de considerar um resultado
+        pronto pra uso (ver CLAUDE.md) -- vai alem de conferir maos extremas
+        e estrutura: para cada mao da amostra, calcula o valor REAL de abrir
+        vs desistir (media sobre reamostragens independentes dos
+        adversarios, via os mesmos helpers `_eval_fold_or_jam`/
+        `_sample_other_hands` usados pelo best-response sem vazamento) e
+        compara com a frequencia que o abridor (seat 0) realmente aprendeu.
+
+        Isso pega o problema de "mao travada" do CFR classico -- uma mao
+        que teve azar de amostragem cedo no treino e nunca mais se
+        recuperou, mesmo com milhoes de iteracoes (jah visto em producao:
+        A5s, A2s, KQs, QJs apareceram quase sempre foldando quando abrir
+        claramente valia mais). O CFR+ (regret com piso em zero + media
+        ponderada por iteracao, ver InfoSet.update_regret e o comentario
+        de t em _play_open_or_fold) deixa isso bem mais raro, mas essa
+        checagem continua sendo o jeito de CONFIRMAR que nao aconteceu de
+        novo num resultado especifico -- nao e' opcional.
+
+        Retorna lista de dicts {hand, gap, trained_freq} para as maos onde
+        a direcao do treino diverge do valor real (gap > gap_threshold e
+        o treino faz o oposto)."""
+        if avg_strategy is None:
+            avg_strategy = self.average_strategy()
+        if sample_hands is None:
+            sample_hands = self.classes  # todas as 169 por padrao
+
+        rng = random.Random(seed)
+        val_fold_const = self._icm_fold_root({}).get(0, 0.0)
+
+        flags = []
+        for hand in sample_hands:
+            val_open = 0.0
+            for _ in range(iterations):
+                hands = self._sample_other_hands(0, hand, rng)
+                val_open += self._eval_fold_or_jam(1, hands, avg_strategy).get(0, 0.0)
+            val_open /= iterations
+            gap = val_open - val_fold_const
+            trained = avg_strategy["phase1"][0][hand]
+            wrong = (gap > gap_threshold and trained < 0.5) or (gap < -gap_threshold and trained > 0.5)
+            if wrong:
+                flags.append({"hand": hand, "gap": gap, "trained_freq": trained})
+        return flags
