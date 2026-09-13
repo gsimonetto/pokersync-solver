@@ -59,26 +59,19 @@ estão resolvidas.
 
 ## Deploy (Railway)
 
-**Status real (2026-09), documentado porque já causou confusão entre os
-dois lados do código:** o produto (`pokersync`) afirma categoricamente
-que este serviço nunca foi publicado e que `SOLVER_API_URL`/
-`SOLVER_API_KEY` não existem em nenhum ambiente dele. Só que
-`scripts/trigger_job.sh`, neste repo, tem uma URL de produção
-hardcoded como valor padrão
-(`https://pokersync-solver-production.up.railway.app`) — um domínio
-específico desses normalmente só existe se um projeto Railway chamado
-`pokersync-solver` foi criado em algum momento. Não há segredo de
-deploy no workflow de CI (só roda testes), nem `.env`/`.env.example`
-commitado (esperado). **Ninguém confirmou ainda, de dentro do código,
-se esse domínio corresponde a um deploy ativo ou é resquício de um
-teste antigo** — ver `BLOCKERS.md` no repo `pokersync` (BLOQUEIO-001).
-Isso não trava nenhum outro trabalho no motor; só o consumo no produto
-(cEV/ICM por mão, `MAIN-007`) depende de resolver isso.
+**Status confirmado (13/09/2026):** o serviço está no ar em
+`https://pokersync-solver-production.up.railway.app` e responde
+`/health` — o dono confirmou diretamente. Isso resolve a ambiguidade
+que existia antes entre os dois lados do código (o produto `pokersync`
+achava que nunca tinha sido publicado). O único passo que falta pra
+ligar o consumo no produto (cEV/ICM por mão, `MAIN-007`) é configurar
+`SOLVER_API_URL`/`SOLVER_API_KEY` nas env vars do projeto `pokersync` no
+Vercel — ver `BLOCKERS.md`/`CHANGELOG.md` no repo `pokersync`.
 
-Passos pra um deploy novo (ou pra confirmar/reaproveitar o existente):
+Passos pra um redeploy (ou pra criar um novo ambiente):
 
-1. Criar novo projeto no Railway, apontando pra este repo (ou abrir o
-   projeto `pokersync-solver` existente, se o domínio acima for real).
+1. Abrir o projeto `pokersync-solver` no Railway (ou criar um novo,
+   apontando pra este repo).
 2. Railway detecta o `Dockerfile` automaticamente (`railway.json` já
    configurado).
 3. Setar as env vars (`SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`,
