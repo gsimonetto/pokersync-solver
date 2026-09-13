@@ -21,9 +21,11 @@ compute_action_evs() no engine).
 Range de exemplo: como o motor não modela as ruas anteriores (flop/
 turn), quem chama este job precisa fornecer range_oop/range_ip já
 prontas (dict classe->peso) representando quem chega no river com o
-quê -- não há "range realista" derivada automaticamente ainda. Ver
-DEFAULT_CBET_RIVER_SPOT abaixo pra um primeiro spot ilustrativo
-(polarizado clássico: valor+blefe vs bluff-catcher).
+quê -- não há "range realista" derivada automaticamente ainda.
+Construir ranges realistas por spot e' trabalho futuro (precisa ou de
+um motor que jogue flop+turn de verdade, ou de ranges cadastradas a mao
+por alguem que entenda o spot). Nao gerar/gravar spot nenhum com range
+inventada so' pra "preencher" o estoque -- so' com range real.
 """
 
 import datetime
@@ -35,28 +37,6 @@ from engine.postflop import PostflopSolver  # noqa: E402
 from jobs.supabase_client import get_client  # noqa: E402
 
 ENGINE_VERSION = "pokersync-solver-v0.6.0-postflop-river-ev"
-
-# Primeiro spot ilustrativo: c-bet de river num board seco/desconectado,
-# pote de tamanho médio, profundidade rasa o bastante pra caber 1 raise
-# all-in depois da aposta inicial. OOP chega com um range polarizado
-# (valor forte + blefe que não tem mais nenhum showdown), IP com um
-# range de bluff-catchers puros (perde pro valor, vence o blefe).
-#
-# ATENCAO: e' um range ILUSTRATIVO pra provar o pipeline ponta a ponta,
-# nao foi derivado de uma simulacao real de flop+turn -- construir
-# ranges realistas por spot e' trabalho futuro (precisa ou de um motor
-# que jogue flop+turn de verdade, ou de ranges cadastradas a mao por
-# alguem que entenda o spot).
-DEFAULT_CBET_RIVER_SPOT = {
-    "label": "cbet_river_dry_board",
-    "board": "Ah Kd 7s 2c 9h",
-    "range_oop": {"AA": 1.0, "KK": 1.0, "AKs": 1.0, "AKo": 1.0, "T9s": 0.5, "87s": 0.5},
-    "range_ip": {"QQ": 1.0, "JJ": 1.0, "TT": 1.0, "99": 1.0},
-    "pot": 20.0,
-    "stack_oop": 40.0,
-    "stack_ip": 40.0,
-    "bet_sizes": (0.33, 0.75, 1.5),
-}
 
 
 def _merge_freq_ev(freq_row: dict, ev_row: dict | None) -> dict:
