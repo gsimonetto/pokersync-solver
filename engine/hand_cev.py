@@ -24,6 +24,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from engine.equity import hand_vs_hand_equity  # noqa: E402
 from engine.icm import icm_equity  # noqa: E402
 
+# Carimbado em toda linha gravada (ADR-011 no Cockpit do produto), mesmo
+# aqui sendo um calculo analitico direto e nao um solve iterativo — serve
+# pra saber qual formula/versao gerou o numero se ela mudar no futuro.
+ENGINE_VERSION = "pokersync-solver-v1.0.0-hand-cev"
+
 
 class HandCevError(ValueError):
     pass
@@ -97,6 +102,7 @@ def compute_hand_cev(
         "hero_icm_if_lose_dollars": round(icm_if_lose, 4),
         "hero_expected_icm_dollars": round(hero_expected_icm, 4),
         "hero_expected_icm_delta_dollars": round(hero_expected_icm - icm_baseline, 4),
+        "engine_version": ENGINE_VERSION,
     }
 
 
