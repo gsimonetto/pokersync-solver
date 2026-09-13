@@ -32,6 +32,10 @@ from engine.equity import parse_combo, EVALUATOR  # noqa: E402
 from engine.icm import icm_equity  # noqa: E402
 from treys import Deck  # noqa: E402
 
+# Carimbado em toda linha gravada (ADR-011 no Cockpit do produto) — serve
+# pra saber qual versao do calculo gerou o numero se a formula mudar.
+ENGINE_VERSION = "pokersync-solver-v1.0.0-hand-cev-multiway"
+
 
 class HandCevMultiwayError(ValueError):
     pass
@@ -143,6 +147,7 @@ def compute_hand_cev_multiway(
         "hero_expected_icm_dollars": round(hero_expected_icm, 4),
         "hero_expected_icm_delta_dollars": round(hero_expected_icm - icm_baseline, 4),
         "players_involved": n,
+        "engine_version": ENGINE_VERSION,
     }
 
 

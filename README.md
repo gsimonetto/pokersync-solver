@@ -59,7 +59,26 @@ estão resolvidas.
 
 ## Deploy (Railway)
 
-1. Criar novo projeto no Railway, apontando pra este repo.
+**Status real (2026-09), documentado porque já causou confusão entre os
+dois lados do código:** o produto (`pokersync`) afirma categoricamente
+que este serviço nunca foi publicado e que `SOLVER_API_URL`/
+`SOLVER_API_KEY` não existem em nenhum ambiente dele. Só que
+`scripts/trigger_job.sh`, neste repo, tem uma URL de produção
+hardcoded como valor padrão
+(`https://pokersync-solver-production.up.railway.app`) — um domínio
+específico desses normalmente só existe se um projeto Railway chamado
+`pokersync-solver` foi criado em algum momento. Não há segredo de
+deploy no workflow de CI (só roda testes), nem `.env`/`.env.example`
+commitado (esperado). **Ninguém confirmou ainda, de dentro do código,
+se esse domínio corresponde a um deploy ativo ou é resquício de um
+teste antigo** — ver `BLOCKERS.md` no repo `pokersync` (BLOQUEIO-001).
+Isso não trava nenhum outro trabalho no motor; só o consumo no produto
+(cEV/ICM por mão, `MAIN-007`) depende de resolver isso.
+
+Passos pra um deploy novo (ou pra confirmar/reaproveitar o existente):
+
+1. Criar novo projeto no Railway, apontando pra este repo (ou abrir o
+   projeto `pokersync-solver` existente, se o domínio acima for real).
 2. Railway detecta o `Dockerfile` automaticamente (`railway.json` já
    configurado).
 3. Setar as env vars (`SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`,
@@ -120,6 +139,84 @@ Não grava nada no Supabase — é stateless, o produto decide o que fazer com
 o resultado (ex: comparar `hero_expected_icm_delta_dollars` contra o
 resultado real da mão pra achar o "luck-adjusted" delta, e somar isso ao
 longo do tempo pra virar Net Expected Profit / EV ROI%).
+
+## cEV/ICM de uma mão jogada — MULTIWAY (3+ jogadores)
+
+Mesma ideia do endpoint heads-up acima, generalizada pra all-in com 3 ou
+mais jogadores e as mãos de TODOS conhecidas (`engine/hand_cev_multiway.py`).
+Diferença de método: heads-up só tem 2 desfechos possíveis (hero ganha ou
+perde), então o $ICM esperado sai de uma fórmula fechada; com 3+ jogadores
+e stacks desiguais (side pots), o número de desfechos explode, então cada
+iteração de Monte Carlo resolve o pote (com side pots corretos) pro board
+sorteado E roda o ICM naquele resultado específico — o $EV final é a média
+do ICM ao longo de todas as iterações. Mais lento que o heads-up por causa
+disso: ~1-2s por chamada com as 1500 iterações padrão (ainda síncrono,
+ainda razoável pro produto), contra <1s do heads-up.
+
+```ts
+const res = await fetch(`${SOLVER_API_URL}/hands/compute_cev_multiway`, {
+  method: "POST",
+  headers: {
+    "Content-Type": "application/json",
+    "X-API-Key": process.env.SOLVER_API_KEY!,
+  },
+  body: JSON.stringify({
+    combos: ["AhAd", "KsKc", "QdQc"], // cartas de CADA jogador all-in, mesma ordem de stacks_before
+    stacks_before: [3000, 4500, 2000],
+    hero_idx: 0, // posição do herói dentro de combos/stacks_before
+    other_stacks: [8000, 5000], // demais jogadores da mesa, parados nesse momento
+    payouts: [500, 300, 200],
+  }),
+});
+// { hero_equity_pct, chips_at_risk, hero_expected_chip_delta,
+//   hero_icm_baseline_dollars, hero_expected_icm_dollars,
+//   hero_expected_icm_delta_dollars, players_involved }
+```
+
+`hero_equity_pct` aqui não é mais um % de vitória binário como no
+heads-up — é a fatia do total em jogo que o herói espera terminar com
+(side pots fazem a equity binária deixar de fazer sentido). Mesmo
+escopo restrito do heads-up: só all-in com todas as mãos conhecidas —
+sem isso, retorna erro em vez de estimar com range assumido. Também não
+grava nada no Supabase (stateless).
+
+**Consumo no produto:** ainda não usado — hoje o cálculo de cEV/ICM do
+produto (`app/api/hand-ev/compute` no repo `pokersync`) só cobre
+all-in heads-up (`findEligibleAllInConfrontation` em
+`lib/poker/hand-ev-eligibility.ts` filtra pra exatamente 2 participantes).
+Consumir este endpoint exigiria estender essa elegibilidade pra 3+
+jogadores no lado do produto.
+
+## EV por ação pós-flop (`PostflopSolver.compute_action_evs()`)
+
+Equivalente pós-flop de `rfi_jam.py::compute_action_evs` (já documentado
+mais abaixo pro pré-flop): calcula o EV de CADA ação disponível em cada
+nó de decisão da árvore pós-flop (não só a frequência média treinada),
+fixando a estratégia média já treinada do oponente e reaproveitando o
+mesmo motor de melhor-resposta (`_br_*`) de `compute_exploitability()`.
+Serve pra expor o "gap" — quanto EV se perde escolhendo uma ação que não
+é a ótima — pro produto mostrar "quanto você perdeu" numa decisão
+pós-flop, mesmo espírito do "Lucro deixado na mesa" que o pré-flop já
+tem.
+
+Devolve um dict por nó de decisão da rua (raiz do OOP, resposta do IP a
+cada tamanho de aposta, resposta do OOP a um raise, e o mesmo trio de
+novo depois de um check inicial) — até 6 nós possíveis numa única rua.
+Cada nó é `{classe: {"<ação>": ev, ..., "best": "<melhor_ação>", "gaps":
+{"<ação>": ev_perdido}}}`, onde `ev_perdido = ev(melhor_ação) -
+ev(ação)` (sempre ≥ 0, 0 pra própria melhor ação). Nós de tamanho de
+aposta específico só aparecem se aquele tamanho for jogável (não maior
+que o stack restante); nós de resposta a um raise só aparecem se
+"raise" tiver probabilidade positiva na estratégia média treinada.
+
+**Já em produção**: `jobs/solve_postflop_batch.py` (job de river) grava
+o formato compacto `[freq, ev, gap]` por ação em `gto_nodes` (mesmo
+espírito do formato que o RFI/Jam já usa) — `ev`/`gap` ficam `null`
+quando o infoset nunca foi alcançado no treino (não tem reach pra
+condicionar o EV médio). Testado em CI (`tests/postflop_action_evs.py`).
+Só o job de river usa isso hoje — turn/flop ainda não têm exploitability
+validada em produção o suficiente pra confiar no gap exposto (ver
+"Status do motor" abaixo).
 
 ## Status do motor (o que já foi validado)
 
