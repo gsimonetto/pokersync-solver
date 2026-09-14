@@ -34,11 +34,12 @@ Autenticação: header `X-API-Key`, comparado contra SOLVER_API_KEY.
 
 import datetime
 import os
+import secrets
 import uuid
 from typing import Optional
 
 from fastapi import BackgroundTasks, FastAPI, Header, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from jobs.supabase_client import get_client
 from jobs.solve_pushfold_batch import run_pushfold_batch
@@ -53,7 +54,11 @@ app = FastAPI(title="PokerSync Solver API", version="0.1.0")
 
 def check_api_key(x_api_key: Optional[str] = Header(default=None)):
     expected = os.environ.get("SOLVER_API_KEY")
-    if not expected or x_api_key != expected:
+    # compare_digest em vez de != -- comparação de string comum vaza, por
+    # tempo de execução, quantos caracteres do começo bateram (timing
+    # attack). Baixa exploitabilidade aqui (HTTPS via Railway), mas o
+    # custo de evitar é zero.
+    if not expected or not x_api_key or not secrets.compare_digest(x_api_key, expected):
         raise HTTPException(status_code=401, detail="API key invalida ou ausente")
 
 
@@ -63,7 +68,11 @@ class PushFoldJobRequest(BaseModel):
     # Obrigatorio so' quando use_icm=True (padrao) -- em chipEV puro
     # (use_icm=False) nao entra na conta, pode mandar [].
     payouts: list[float] = []
-    iterations: int = 2000
+    # Limite generoso (100x o default) so' pra impedir alguem com a chave
+    # de API pedir um numero absurdo de iteracoes e prender o processo/
+    # gerar custo de compute sem fim -- nenhum job de producao real chega
+    # perto disso.
+    iterations: int = Field(default=2000, gt=0, le=200_000)
     # True (padrao, preserva todo spot ja em producao): $ICM -- considera
     # a estrutura de premiacao do torneio. False: chipEV puro (cash game,
     # ou torneio bem no inicio, longe de bolha) -- payouts fica ignorado.
@@ -131,7 +140,9 @@ class RfiJamJobRequest(BaseModel):
     # tamanho já em produção pro mesmo matchup/stack). Omitir mantém o
     # comportamento de sempre (open_size escalar).
     open_sizes: list[float] | None = None
-    iterations: int = 2_500_000
+    # Default de producao ja e' 2.5M -- limite com folga de 4x, so' pra
+    # barrar um valor absurdo vindo de um cliente com a chave.
+    iterations: int = Field(default=2_500_000, gt=0, le=10_000_000)
     # True (padrao, preserva todo spot ja em producao): $ICM -- considera
     # a estrutura de premiacao do torneio. False: chipEV puro (cash game,
     # ou torneio bem no inicio, longe de bolha) -- payouts fica ignorado.
@@ -200,8 +211,11 @@ class PostflopRiverSpot(BaseModel):
 
 
 class PostflopRiverJobRequest(BaseModel):
-    spots: list[PostflopRiverSpot]
-    iterations: int = 30_000
+    # Limite de spots por request: cada spot roda seu proprio treino de
+    # solver -- sem isso, uma lista gigante * iterations altas vira um
+    # jeito facil de prender o worker por muito tempo.
+    spots: list[PostflopRiverSpot] = Field(..., min_length=1, max_length=20)
+    iterations: int = Field(default=30_000, gt=0, le=500_000)
 
 
 @app.post("/jobs/postflop_river")
@@ -258,7 +272,10 @@ class HandCevRequest(BaseModel):
     villain_stack_before: float
     other_stacks: list[float] = []
     payouts: list[float]
-    iterations: int = 5000
+    # Sincrono (a resposta HTTP so' volta quando termina) -- limite mais
+    # apertado que os jobs em background, pra nunca segurar a requisicao
+    # por tempo demais.
+    iterations: int = Field(default=5000, gt=0, le=50_000)
 
 
 @app.post("/hands/compute_cev")
@@ -286,7 +303,9 @@ class HandCevMultiwayRequest(BaseModel):
     hero_idx: int  # posicao do heroi dentro de combos/stacks_before
     other_stacks: list[float] = []
     payouts: list[float]
-    iterations: int = 1500
+    # Sincrono e mais pesado por iteracao que o heads-up (roda ICM a cada
+    # volta) -- limite proporcionalmente mais baixo.
+    iterations: int = Field(default=1500, gt=0, le=20_000)
 
 
 @app.post("/hands/compute_cev_multiway")
