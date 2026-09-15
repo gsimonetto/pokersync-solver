@@ -919,3 +919,165 @@ class MultiwayRfiSolver:
         finally:
             self.EQUITY_BATCH = original_equity_batch
         return flags
+
+    def check_seat_phase1_convergence(self, seat_i, avg_strategy=None, sample_hands=None,
+                                       iterations=25, gap_threshold=0.3, seed=99,
+                                       equity_precision_batch=600):
+        """Como check_opener_convergence, mas pra decisao de fold-vs-jam de
+        QUALQUER seat >= 1 quando a acao chega nele em fase 1 (todo mundo
+        antes ja tendo foldado -- por construcao, ver _play_fold_or_jam).
+
+        Diferente do abridor (seat 0), esses seats tem NO MAXIMO uma
+        decisao propria por mao inteira (fold/jam em fase 1 OU responder
+        em fase 2 -- ramos mutuamente exclusivos, nunca os dois na mesma
+        mao). Por isso NAO ha o problema de vazamento que check_opener_
+        convergence precisa corrigir (fixar a resposta de fase 2 antes de
+        julgar fase 1): aqui dá pra usar avg_strategy direto em todo
+        mundo, inclusive no proprio seat_i, porque a decisao sendo
+        avaliada e' a UNICA que ele toma nesse ramo da arvore.
+
+        Retorna lista de dicts {seat, hand, gap, trained_freq}."""
+        if seat_i == 0:
+            raise ValueError("seat 0 (abridor) usa check_opener_convergence(), nao este metodo")
+        if avg_strategy is None:
+            avg_strategy = self.average_strategy()
+        if sample_hands is None:
+            sample_hands = self.classes
+
+        rng = random.Random(seed)
+        original_equity_batch = self.EQUITY_BATCH
+        self.EQUITY_BATCH = equity_precision_batch
+        try:
+            flags = []
+            for hand in sample_hands:
+                val_fold = 0.0
+                val_jam = 0.0
+                for _ in range(iterations):
+                    hands = self._sample_other_hands(seat_i, hand, rng)
+                    val_fold += self._eval_fold_or_jam(seat_i + 1, hands, avg_strategy).get(seat_i, 0.0)
+                    val_jam += self._eval_phase2(seat_i, hands, avg_strategy).get(seat_i, 0.0)
+                val_fold /= iterations
+                val_jam /= iterations
+                gap = val_jam - val_fold
+                trained = avg_strategy["phase1"][seat_i][hand]
+                wrong = (gap > gap_threshold and trained < 0.5) or (gap < -gap_threshold and trained > 0.5)
+                if wrong:
+                    flags.append({"seat": seat_i, "hand": hand, "gap": gap, "trained_freq": trained})
+        finally:
+            self.EQUITY_BATCH = original_equity_batch
+        return flags
+
+    def check_phase2_convergence(self, seat_i, jammer, avg_strategy=None, sample_hands=None,
+                                  iterations=40, gap_threshold=0.3, seed=99,
+                                  equity_precision_batch=600):
+        """Checa a decisao de call-vs-fold de `seat_i` respondendo a um
+        jam de `jammer` (seat_i deve ser 0, ou > jammer -- os unicos
+        responders validos nessa ordem de acao, ver _eval_phase2).
+
+        Mesmo espirito de check_opener_convergence, mas pra fase 2: gap
+        e' o valor esperado de pagar menos o de desistir, ponderado pela
+        probabilidade de `jammer` TER REALMENTE jammado com cada mao
+        amostrada dele (peso de importancia condicionado em "jammer
+        jammou" -- mesmo esquema usado por _fix_policy_phase2 pra fixar
+        a melhor resposta num best-response de verdade). Sem vazamento:
+        seat_i so' tem essa unica decisao nesse ramo (responder a UM
+        jam especifico), entao os demais podem usar avg_strategy direto.
+
+        Retorna lista de dicts {seat, jammer, hand, gap, trained_freq}."""
+        if not (seat_i == 0 or seat_i > jammer):
+            raise ValueError(f"seat {seat_i} nunca responde ao jam de {jammer} nesta ordem de acao")
+        if avg_strategy is None:
+            avg_strategy = self.average_strategy()
+        if sample_hands is None:
+            sample_hands = self.classes
+
+        rng = random.Random(seed)
+        original_equity_batch = self.EQUITY_BATCH
+        self.EQUITY_BATCH = equity_precision_batch
+        try:
+            flags = []
+            responders = [i for i in range(self.n_seats) if i > jammer]
+            responders.append(0)
+            for hand in sample_hands:
+                w_fold, w_call, w_total = 0.0, 0.0, 0.0
+                for _ in range(iterations):
+                    hands = self._sample_other_hands(seat_i, hand, rng)
+                    w = avg_strategy["phase1"][jammer][hands[jammer]]
+                    if w <= 0:
+                        continue
+                    icm_fold = self._eval_resolve_responders_forced(
+                        jammer, responders, 0, {jammer}, hands, avg_strategy, seat_i, 0
+                    )
+                    icm_call = self._eval_resolve_responders_forced(
+                        jammer, responders, 0, {jammer}, hands, avg_strategy, seat_i, 1
+                    )
+                    w_fold += w * icm_fold.get(seat_i, 0.0)
+                    w_call += w * icm_call.get(seat_i, 0.0)
+                    w_total += w
+                if w_total <= 0:
+                    # nenhuma amostra teve jammer jammando de verdade --
+                    # sem dado suficiente pra essa mao, pula (nao da pra
+                    # confundir com "gap zero", seria falso positivo).
+                    continue
+                gap = (w_call - w_fold) / w_total
+                trained = avg_strategy["phase2"][seat_i][jammer][hand]
+                wrong = (gap > gap_threshold and trained < 0.5) or (gap < -gap_threshold and trained > 0.5)
+                if wrong:
+                    flags.append({"seat": seat_i, "jammer": jammer, "hand": hand,
+                                  "gap": gap, "trained_freq": trained})
+        finally:
+            self.EQUITY_BATCH = original_equity_batch
+        return flags
+
+    def check_full_convergence(self, avg_strategy=None, sample_hands=None,
+                                iterations=25, phase2_iterations=40, gap_threshold=0.3,
+                                seed=99, equity_precision_batch=600):
+        """Roda a checagem OBRIGATORIA de convergencia (ver CLAUDE.md) pra
+        TODAS as decisoes do motor, nao so' a do abridor:
+          - "opener_phase1": abrir vs desistir do abridor (seat 0) --
+            check_opener_convergence().
+          - "other_phase1": fold vs jam de cada seat >= 1, quando a acao
+            chega nele em fase 1 -- check_seat_phase1_convergence().
+          - "phase2": call vs fold de cada seat respondendo a cada jammer
+            possivel -- check_phase2_convergence(), incluindo as
+            respostas do proprio abridor (que antes so' eram usadas
+            internamente pra corrigir o vazamento de opener_phase1, sem
+            nunca ter sido checadas por si so').
+
+        Antes desta versao (2026-09), so' opener_phase1 tinha checagem
+        automatica -- as outras duas categorias usam o MESMO mecanismo
+        de CFR, entao podem sofrer do mesmo problema de "mao travada"
+        (documentado como lacuna conhecida no CLAUDE.md ate aqui).
+
+        Retorna um dict {"opener_phase1": [...], "other_phase1": [...],
+        "phase2": [...]} -- cada lista no mesmo formato de
+        check_opener_convergence/check_seat_phase1_convergence/
+        check_phase2_convergence."""
+        if avg_strategy is None:
+            avg_strategy = self.average_strategy()
+
+        flags = {
+            "opener_phase1": self.check_opener_convergence(
+                avg_strategy, sample_hands, iterations, gap_threshold, seed,
+                equity_precision_batch=equity_precision_batch,
+            ),
+            "other_phase1": [],
+            "phase2": [],
+        }
+        for seat_i in range(1, self.n_seats):
+            flags["other_phase1"].extend(
+                self.check_seat_phase1_convergence(
+                    seat_i, avg_strategy, sample_hands, iterations, gap_threshold, seed,
+                    equity_precision_batch=equity_precision_batch,
+                )
+            )
+        for jammer in range(1, self.n_seats):
+            responders = [i for i in range(self.n_seats) if i > jammer] + [0]
+            for seat_i in responders:
+                flags["phase2"].extend(
+                    self.check_phase2_convergence(
+                        seat_i, jammer, avg_strategy, sample_hands, phase2_iterations, gap_threshold, seed,
+                        equity_precision_batch=equity_precision_batch,
+                    )
+                )
+        return flags

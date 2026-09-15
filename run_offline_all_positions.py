@@ -186,19 +186,24 @@ def run_one(label: str, config: dict, equity_matrix, classes):
     br_by_seat = solver.compute_exploitability(strat)
     exploitability = sum(br_by_seat.values())
 
-    # Checagem OBRIGATORIA (ver CLAUDE.md): confere, mao por mao, se abrir
-    # ou desistir bate com o que o abridor realmente aprendeu. Mesmo com
-    # o CFR+ (ver InfoSet.update_regret), uma mao pode ocasionalmente ficar
-    # travada numa decisao pior -- essa checagem existe pra pegar isso
-    # ANTES de considerar o resultado pronto pra uso, nao depois.
-    print(f"  [{label}] rodando checagem de convergencia (abrir vs desistir, todas as 169 maos)...")
-    sanity_flags = solver.check_opener_convergence()
-    if sanity_flags:
-        print(f"  [{label}] ATENCAO: {len(sanity_flags)} mao(s) com direcao errada:")
-        for f_ in sorted(sanity_flags, key=lambda x: -abs(x["gap"])):
-            print(f"      {f_['hand']}: gap={f_['gap']:+.3f}  freq_treinada_abrir={f_['trained_freq']:.4f}")
+    # Checagem OBRIGATORIA (ver CLAUDE.md): confere, mao por mao, TODAS as
+    # decisoes do motor (abridor em fase 1, os outros seats em fase 1, e
+    # call/fold de qualquer seat em fase 2) contra o valor real calculado
+    # via best-response. Mesmo com o CFR+ (ver InfoSet.update_regret), uma
+    # mao pode ocasionalmente ficar travada numa decisao pior -- essa
+    # checagem existe pra pegar isso ANTES de considerar o resultado
+    # pronto pra uso, nao depois.
+    print(f"  [{label}] rodando checagem de convergencia (abridor + outros seats + fase 2, todas as 169 maos)...")
+    sanity_flags = solver.check_full_convergence()
+    total_flags = sum(len(v) for v in sanity_flags.values())
+    if total_flags:
+        print(f"  [{label}] ATENCAO: {total_flags} decisao(oes) com direcao errada:")
+        for categoria, flags_lista in sanity_flags.items():
+            for f_ in sorted(flags_lista, key=lambda x: -abs(x["gap"])):
+                extra = f" (seat {f_['seat']}" + (f" vs jam de {f_['jammer']})" if "jammer" in f_ else ")") if "seat" in f_ else ""
+                print(f"      [{categoria}]{extra} {f_['hand']}: gap={f_['gap']:+.3f}  freq_treinada={f_['trained_freq']:.4f}")
     else:
-        print(f"  [{label}] checagem de convergencia: OK, nenhuma mao suspeita.")
+        print(f"  [{label}] checagem de convergencia: OK, nenhuma decisao suspeita.")
 
     with open(result_path, "wb") as f:
         pickle.dump({
@@ -208,7 +213,7 @@ def run_one(label: str, config: dict, equity_matrix, classes):
         }, f)
     checkpoint_path.unlink(missing_ok=True)
     print(f"[{label}] CONCLUÍDO -- exploitability={exploitability:.3f} -- "
-          f"{len(sanity_flags)} mao(s) suspeita(s) -- salvo em {result_path}\n")
+          f"{total_flags} decisao(oes) suspeita(s) -- salvo em {result_path}\n")
 
 
 ENGINE_VERSION_MULTIWAY = "pokersync-solver-v0.1.0-multiway-ante"

@@ -24,26 +24,64 @@ discorda) precisa ser reportada.**
 
 Já existe uma ferramenta pronta pra isso — não escrever script solto de
 novo, usar direto:
-- `MultiwayRfiSolver.check_opener_convergence(avg_strategy=None,
-  sample_hands=None, iterations=25, gap_threshold=0.3)` em
-  `engine/multiway_rfi.py` — testa as 169 mãos do abridor (ou uma
-  amostra, via `sample_hands`) e devolve as que ficaram na direção
-  errada. ~2-3s por mão com iterations=25.
-- `run_offline_all_positions.py` já chama isso automaticamente depois
-  de cada treino e salva o resultado em `sanity_flags` dentro do
-  `resultado_*.pkl` — ao conferir um arquivo nesse formato, ler esse
-  campo primeiro antes de rodar checagem manual do zero.
-- Essa checagem cobre hoje só a decisão do ABRIDOR (fase 1, seat 0).
-  As decisões de fold/jam dos outros seats e as respostas de fase 2
-  (call/fold a um all-in) usam o mesmo mecanismo de CFR e podem, em
-  tese, sofrer do mesmo problema -- ainda não têm uma checagem
-  automática equivalente. Se for validar um resultado a fundo,
-  mencionar essa lacuna e considerar estender o método pra cobrir isso
-  também.
+- `MultiwayRfiSolver.check_full_convergence(avg_strategy=None,
+  sample_hands=None, iterations=25, phase2_iterations=40,
+  gap_threshold=0.3)` em `engine/multiway_rfi.py` — cobre TODAS as
+  decisões do motor (2026-09 v3, ver histórico abaixo), não só o
+  abridor: devolve um dict `{"opener_phase1": [...], "other_phase1":
+  [...], "phase2": [...]}`, cada lista no formato
+  `{hand, gap, trained_freq}` (mais `seat`/`jammer` nas duas últimas
+  categorias) com as decisões que ficaram na direção errada.
+  - `opener_phase1`: abrir vs desistir do abridor (seat 0).
+  - `other_phase1`: fold vs jam de cada seat >= 1 quando a ação chega
+    nele em fase 1.
+  - `phase2`: call vs fold de qualquer seat (incluindo o abridor)
+    respondendo a um all-in de qualquer jammer possível.
+  Métodos individuais (`check_opener_convergence`,
+  `check_seat_phase1_convergence`, `check_phase2_convergence`) também
+  existem separados, se for preciso focar numa categoria só.
+- `run_offline_all_positions.py` já chama `check_full_convergence()`
+  automaticamente depois de cada treino e salva o resultado (esse dict
+  com 3 categorias) em `sanity_flags` dentro do `resultado_*.pkl` — ao
+  conferir um arquivo nesse formato, ler esse campo primeiro antes de
+  rodar checagem manual do zero. Arquivos `resultado_*.pkl` gerados
+  ANTES dessa versão têm `sanity_flags` como lista simples (só
+  `opener_phase1`) -- formato antigo, não o dict de 3 categorias.
+- Todas essas checagens rodam com `equity_precision_batch=600` por
+  padrão -- ver histórico abaixo sobre por que isso é necessário (não
+  é só cosmético, era a causa de 40% de falso alarme num resultado
+  real antes dessa correção).
 
 Motivo: o usuário odeia retrabalho. Uma validação incompleta que exige
 voltar atrás depois (como já aconteceu) é pior do que demorar mais na
 validação inicial.
+
+## Histórico: por que a checagem mudou tanto (2026-09)
+
+Auditando um resultado real (CO vs BB 15bb, 4 seats, 5M iterações),
+`check_opener_convergence` original apontou 68 de 169 mãos (40%!) como
+"na direção errada" -- desproporcional demais pra ser só convergência
+lenta. Investigação encontrou dois bugs NA FERRAMENTA DE CHECAGEM, não
+no treino:
+1. **Vazamento**: julgava a decisão de fase 1 do abridor usando a
+   resposta de fase 2 dele MESMO ainda não validada (efeito circular).
+   Corrigido fixando a resposta de fase 2 via best-response antes
+   (mesma técnica de `compute_exploitability`).
+2. **Ruído**: com 3+ adversários, cada reamostragem caía numa
+   combinação de mãos quase sempre NOVA, então o cache incremental de
+   equity (pensado pra CFR, que revisita a MESMA combinação milhões de
+   vezes) nunca acumulava precisão -- cada amostra usava só 150
+   simulações brutas, sozinha. Confirmado empiricamente: rodando a
+   MESMA mão duas vezes, o gap trocava de sinal. Corrigido pedindo uma
+   equity mais precisa por amostra (`equity_precision_batch`) em vez
+   de mais reamostragens.
+
+Depois da correção, reconferindo as 68 mãos com amostragem grande
+(300-3000 por mão): **68 de 68 eram falso alarme** -- o treino de
+produção estava correto, só a ferramenta de checagem que mentia.
+Lição: ao investigar um `sanity_flags` suspeito, considerar SEMPRE a
+hipótese de bug na própria checagem, não só no motor -- rodar de novo
+com mais amostras/seed diferente antes de reportar como bug real.
 
 ## Nota sobre `use_cfr_plus`
 
