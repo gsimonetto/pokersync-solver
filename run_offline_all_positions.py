@@ -129,7 +129,7 @@ def build_matchup_config(opener: str, stack: float) -> dict:
     }
 
 
-TOTAL_ITERATIONS = 5_000_000
+TOTAL_ITERATIONS = 1_000_000
 CHECKPOINT_EVERY = 50_000
 EQUITY_MATRIX_PATH = Path("data/equity_matrix_cache.pkl")
 
