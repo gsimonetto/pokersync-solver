@@ -834,14 +834,13 @@ class MultiwayRfiSolver:
         }
 
     def check_opener_convergence(self, avg_strategy=None, sample_hands=None,
-                                  iterations=25, gap_threshold=0.3, seed=99):
+                                  iterations=25, gap_threshold=0.3, seed=99,
+                                  phase2_fix_samples=40, equity_precision_batch=600):
         """Checagem de sanidade OBRIGATORIA antes de considerar um resultado
         pronto pra uso (ver CLAUDE.md) -- vai alem de conferir maos extremas
         e estrutura: para cada mao da amostra, calcula o valor REAL de abrir
-        vs desistir (media sobre reamostragens independentes dos
-        adversarios, via os mesmos helpers `_eval_fold_or_jam`/
-        `_sample_other_hands` usados pelo best-response sem vazamento) e
-        compara com a frequencia que o abridor (seat 0) realmente aprendeu.
+        vs desistir e compara com a frequencia que o abridor (seat 0)
+        realmente aprendeu.
 
         Isso pega o problema de "mao travada" do CFR classico -- uma mao
         que teve azar de amostragem cedo no treino e nunca mais se
@@ -852,6 +851,33 @@ class MultiwayRfiSolver:
         de t em _play_open_or_fold) deixa isso bem mais raro, mas essa
         checagem continua sendo o jeito de CONFIRMAR que nao aconteceu de
         novo num resultado especifico -- nao e' opcional.
+
+        v2 (2026-09, achado auditando um resultado de 4 seats com 40% das
+        maos flagadas -- desproporcional demais pra ser so' convergencia
+        lenta): a v1 tinha DOIS problemas que infestavam o "gap" de ruido/
+        vies, sem relacao com a qualidade real do treino --
+          1. VAZAMENTO: usava `_eval_fold_or_jam` puro, que decide a
+             resposta do proprio abridor em fase 2 (call/fold contra um
+             jam) pela media que ELE MESMO aprendeu -- se essa media
+             ainda nao convergiu bem (fase 2 nunca teve checagem
+             equivalente, ver nota no CLAUDE.md), isso contamina o
+             julgamento da decisao de fase 1 que estamos tentando medir.
+             Fix: fixa a resposta OTIMA de fase 2 do abridor primeiro
+             (via `_fix_policy_phase2`, mesma tecnica sem vazamento de
+             `compute_exploitability`/`_fix_policy_root_seat0`), e usa
+             `_eval_fold_or_jam_seat0_fixed` daqui pra frente.
+          2. RUIDO: cada reamostragem de maos dos adversarios caia quase
+             sempre numa combinacao NOVA (com 3+ adversarios o espaco de
+             combinacoes e' grande demais pra repetir dentro de poucas
+             iteracoes), entao o cache incremental de equity (pensado pra
+             CFR, que revisita a MESMA combinacao milhoes de vezes) nunca
+             tinha chance de acumular precisao -- cada amostra usava so'
+             EQUITY_BATCH=150 simulacoes brutas, sozinha, sem refinamento.
+             Confirmado empiricamente: rodando a MESMA mao duas vezes
+             (mesma avg_strategy) o gap trocava de sinal. Fix: em vez de
+             pedir mais reamostragens (caro), pede uma equity mais precisa
+             POR amostra (equity_precision_batch, default 600 -- 4x mais
+             preciso que o normal do treino) so' durante esta checagem.
 
         Retorna lista de dicts {hand, gap, trained_freq} para as maos onde
         a direcao do treino diverge do valor real (gap > gap_threshold e
@@ -864,16 +890,32 @@ class MultiwayRfiSolver:
         rng = random.Random(seed)
         val_fold_const = self._icm_fold_root({}).get(0, 0.0)
 
-        flags = []
-        for hand in sample_hands:
-            val_open = 0.0
-            for _ in range(iterations):
-                hands = self._sample_other_hands(0, hand, rng)
-                val_open += self._eval_fold_or_jam(1, hands, avg_strategy).get(0, 0.0)
-            val_open /= iterations
-            gap = val_open - val_fold_const
-            trained = avg_strategy["phase1"][0][hand]
-            wrong = (gap > gap_threshold and trained < 0.5) or (gap < -gap_threshold and trained > 0.5)
-            if wrong:
-                flags.append({"hand": hand, "gap": gap, "trained_freq": trained})
+        # fixa a resposta de fase 2 do abridor (seat 0) pra cada jammer
+        # possivel, sem vazamento -- feito UMA VEZ so', reaproveitado pra
+        # todas as maos de sample_hands.
+        phase2_policy = {}
+        for jammer in range(1, self.n_seats):
+            phase2_policy[jammer] = self._fix_policy_phase2(
+                0, jammer, avg_strategy, phase2_fix_samples, rng
+            )
+
+        original_equity_batch = self.EQUITY_BATCH
+        self.EQUITY_BATCH = equity_precision_batch
+        try:
+            flags = []
+            for hand in sample_hands:
+                val_open = 0.0
+                for _ in range(iterations):
+                    hands = self._sample_other_hands(0, hand, rng)
+                    val_open += self._eval_fold_or_jam_seat0_fixed(
+                        1, hands, avg_strategy, phase2_policy
+                    ).get(0, 0.0)
+                val_open /= iterations
+                gap = val_open - val_fold_const
+                trained = avg_strategy["phase1"][0][hand]
+                wrong = (gap > gap_threshold and trained < 0.5) or (gap < -gap_threshold and trained > 0.5)
+                if wrong:
+                    flags.append({"hand": hand, "gap": gap, "trained_freq": trained})
+        finally:
+            self.EQUITY_BATCH = original_equity_batch
         return flags
