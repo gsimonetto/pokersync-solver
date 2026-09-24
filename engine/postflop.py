@@ -68,6 +68,11 @@ def parse_board(board) -> list:
         cards = [board[i:i + 2] for i in range(0, len(board), 2)]
     else:
         cards = list(board)
+    for c in cards:
+        # carta invalida (ex 'Zz', 'ah', '10h') virava um KeyError solto do
+        # treys la' no meio do treino -- mensagem clara logo na entrada
+        if len(c) != 2 or c[0] not in RANKS or c[1] not in SUITS:
+            raise ValueError(f"carta invalida no board: {c!r} (formato: valor AKQJT98765432 + naipe shdc, ex 'Ah')")
     if len(set(cards)) != len(cards):
         raise ValueError(f"board com cartas repetidas: {cards}")
     if len(cards) not in (3, 4, 5):
@@ -213,6 +218,17 @@ class PostflopSolver:
         self.rng = random.Random(seed)
 
         classes = all_hand_classes()
+        # nome de mão escrito errado ('AKS', 'KAs', 'AK') era IGNORADO em
+        # silêncio -- o spot saía resolvido com um range diferente do pedido
+        valid = set(classes)
+        for label, rng_dict in (("range_oop", range_oop), ("range_ip", range_ip)):
+            unknown = sorted(k for k in rng_dict if k not in valid)
+            if unknown:
+                raise ValueError(f"{label} tem classes de mão inválidas: {unknown} "
+                                 f"(formato: 'AKs', 'AKo', 'QQ' -- maior carta primeiro)")
+            negative = sorted(k for k, w in rng_dict.items() if w < 0)
+            if negative:
+                raise ValueError(f"{label} tem peso negativo em: {negative}")
         combos0 = {c: expand_class_combos(c, self.board0) for c in classes}
 
         self.classes_oop = [c for c in classes if combos0[c] and range_oop.get(c, 0.0) > 0.0]
