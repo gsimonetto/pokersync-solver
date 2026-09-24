@@ -56,7 +56,9 @@ Opções úteis:
   --mesa 9            mesa de 9 jogadores (padrão: 8; a 9 inclui UTG+2)
   --posicoes CO,HJ     só essas posições (padrão: todas, na ordem da fila)
   --stacks 15,25       só esses stacks (padrão: 15,25,40,60)
-  --iteracoes 200000   alvo de iterações por combinação (padrão: 1.000.000)
+  --iteracoes 200000   alvo de iterações por combinação, igual pra todas as
+                       posições (padrão: depende da posição, ver
+                       ITERATIONS_BY_POSITION -- 5M em CO/HJ, 3M no resto)
   --pasta CAMINHO      onde ficam checkpoints/resultados (padrão: a pasta
                        deste script, mesmo lugar de antes)
 
@@ -147,7 +149,20 @@ def build_matchup_config(opener: str, stack: float, table_size: int = TABLE_SIZE
     }
 
 
-TOTAL_ITERATIONS = 1_000_000
+# Iterações por posição (2026-09-24). Com 1M o CO já saiu praticamente
+# certo (validação: 2 suspeitas em 2.534 decisões, 1 real e numa situação
+# que acontece em ~0,01% das mãos); mais iterações servem pra essas
+# situações raras. Posições com mais seats são MUITO mais lentas (CO ~990
+# it/s, UTG ~38 it/s medidos num núcleo), por isso recebem menos.
+ITERATIONS_BY_POSITION = {
+    "CO": 5_000_000,
+    "HJ": 5_000_000,
+    "MP": 3_000_000,
+    "UTG+2": 3_000_000,
+    "UTG+1": 3_000_000,
+    "UTG": 3_000_000,
+}
+TOTAL_ITERATIONS = 3_000_000  # posição fora da tabela acima
 CHECKPOINT_MINUTES = 10
 
 ENGINE_VERSION_MULTIWAY = "pokersync-solver-v0.2.0-multiway-ante"
@@ -292,7 +307,8 @@ def main():
                         help="jogadores na mesa (8 = padrão, 9 inclui UTG+2)")
     parser.add_argument("--posicoes", type=lambda t: _parse_list(t, str), default=None)
     parser.add_argument("--stacks", type=lambda t: _parse_list(t, float), default=STACKS)
-    parser.add_argument("--iteracoes", type=int, default=TOTAL_ITERATIONS)
+    parser.add_argument("--iteracoes", type=int, default=None,
+                        help="igual pra todas as posições (padrão: 5M em CO/HJ, 3M no resto)")
     parser.add_argument("--pasta", type=Path, default=BASE_DIR)
     args = parser.parse_args()
 
@@ -301,7 +317,7 @@ def main():
     for p in positions:
         if p not in queue:
             sys.exit(f"ERRO: posição desconhecida {p!r} pra mesa de {args.mesa} -- use uma de {', '.join(queue)}")
-    if args.iteracoes <= 0:
+    if args.iteracoes is not None and args.iteracoes <= 0:
         sys.exit("ERRO: --iteracoes precisa ser positivo")
     if any(s_ <= ANTE_BB + 1.0 for s_ in args.stacks):
         sys.exit("ERRO: stacks precisam ser maiores que o blind + ante")
@@ -312,16 +328,20 @@ def main():
         upload_results(out_dir, positions, args.stacks, args.dry_run, args.mesa)
         return
 
+    def iterations_for(opener):
+        return args.iteracoes or ITERATIONS_BY_POSITION.get(opener, TOTAL_ITERATIONS)
+
     jobs = [(opener, stack) for opener in positions for stack in args.stacks]
+    per_pos = ", ".join(f"{p} {iterations_for(p):,}" for p in positions)
     print(f"Motor {ENGINE_VERSION}. Mesa de {args.mesa} jogadores. Fila: {len(jobs)} combinação(ões) "
-          f"(posição x stack), {args.iteracoes:,} iterações cada. Arquivos em: {out_dir}\n"
+          f"(posição x stack). Iterações: {per_pos}. Arquivos em: {out_dir}\n"
           f"Pode parar (Ctrl+C) e retomar a qualquer momento.\n", flush=True)
 
     with GracefulStop() as stop:
         for opener, stack in jobs:
             config = build_matchup_config(opener, stack, args.mesa)
             status = train_and_evaluate(
-                label_for(opener, stack, args.mesa), config, args.iteracoes, out_dir,
+                label_for(opener, stack, args.mesa), config, iterations_for(opener), out_dir,
                 make_solver_factory(config), ENGINE_VERSION, stop,
                 checkpoint_minutes=CHECKPOINT_MINUTES,
             )
