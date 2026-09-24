@@ -78,7 +78,35 @@ def test_multiway_chipev_diverge_de_icm_com_pressao_de_bolha():
     print("  OK -- o modo realmente muda a estrategia (use_icm nao e' um no-op).\n")
 
 
+def test_showdown_chipev_mantem_perda_de_quem_foldou():
+    """Regressão (2026-09-24): em chipEV, o showdown com 2+ jogadores
+    vivos deixava de fora do resultado quem tinha foldado com dinheiro no
+    pote (valor negativo: SB perde 0.5, abridor perde o open) -- quem lia
+    com .get(seat, 0.0) via 0 em vez da perda real, e o fold desses seats
+    parecia mais barato do que é (viés pra foldar)."""
+    print("--- chipEV: showdown multiway mantém a perda de quem foldou ---")
+    solver = MultiwayRfiSolver(
+        seat_names=["CO", "SB", "BB"], seat_idx_in_table=[0, 1, 2], seat_posts=[0.0, 0.5, 1.0],
+        table_stacks=[20, 20, 20], payouts=None, use_icm=False, open_size=2.2, effective_stack=20,
+        equity_matrix=_EQUITY_MATRIX, classes=_CLASSES, ante_pool=0.375,
+    )
+    hands = {0: "AA", 1: "72o", 2: "KK"}
+    # SB foldou (tinha 0.5 no pote); CO e BB foram pro showdown
+    result = solver._showdown({0, 2}, hands)
+    assert abs(result.get(1, 0.0) - (-0.5)) < 1e-9, f"SB foldou com 0.5 no pote, deveria ficar -0.5: {result}"
+    # abridor foldou pro jam (tinha aberto 2.2); SB e BB no showdown
+    result = solver._showdown({1, 2}, hands)
+    assert abs(result.get(0, 0.0) - (-2.2)) < 1e-9, f"abridor foldou depois de abrir 2.2: {result}"
+    # conservação: tudo que um perde o outro ganha (+ o ante morto, que
+    # não sai do bolso de nenhum seat modelado)
+    for live in ({0, 2}, {1, 2}, {0, 1, 2}, {0, 1}):
+        result = solver._showdown(live, hands)
+        assert abs(sum(result.values()) - 0.375) < 1e-9, (live, result)
+    print("  OK -- SB fica com -0.5 e o abridor com -2.2 quando foldam; fichas conservadas\n")
+
+
 if __name__ == "__main__":
     test_multiway_chipev_nao_quebra_e_sanidade()
     test_multiway_chipev_diverge_de_icm_com_pressao_de_bolha()
+    test_showdown_chipev_mantem_perda_de_quem_foldou()
     print("Todos os testes de multiway_rfi_chipev passaram.")

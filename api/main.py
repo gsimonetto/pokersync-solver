@@ -258,11 +258,19 @@ def create_postflop_river_job(req: PostflopRiverJobRequest, background_tasks: Ba
 @app.get("/jobs/{job_id}")
 def get_job(job_id: str, x_api_key: Optional[str] = Header(default=None)):
     check_api_key(x_api_key)
+    # .limit(1) em vez de .single(): com .single(), um id inexistente faz o
+    # PostgREST responder erro (0 linhas) e a biblioteca levanta excecao --
+    # virava erro 500 em vez do 404 abaixo. Id que nem e' UUID tambem vira
+    # 404 direto (o banco rejeitaria a comparacao com a coluna uuid).
+    try:
+        uuid.UUID(job_id)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="Job nao encontrado")
     client = get_client()
-    result = client.table("solver_jobs").select("*").eq("id", job_id).single().execute()
+    result = client.table("solver_jobs").select("*").eq("id", job_id).limit(1).execute()
     if not result.data:
         raise HTTPException(status_code=404, detail="Job nao encontrado")
-    return result.data
+    return result.data[0]
 
 
 class HandCevRequest(BaseModel):

@@ -34,11 +34,12 @@ PAYOUTS = [500.0, 300.0, 200.0]
 ITERATIONS = 60_000
 SEED = 42
 
-# build_final_equity_matrix NAO e' deterministica entre chamadas
-# separadas no mesmo processo (confirmado: legacy vs legacy, mesma
-# seed, diverge se cada um builda a propria matriz) -- entao os testes
-# aqui buildam UMA matriz e reusam nos dois solvers, isolando o que
-# realmente queremos comparar (a logica do solver, nao a da equity).
+# Ate' 2026-09-24 build_final_equity_matrix NAO era deterministica entre
+# chamadas separadas (o treys.Deck() usava um gerador proprio, fora do
+# controle da seed); agora e' (avaliador proprio + gerador semeado). Os
+# testes continuam buildando UMA matriz e reusando nos dois solvers --
+# isola o que realmente queremos comparar (a logica do solver, nao a da
+# equity) e economiza tempo.
 _EQUITY_MATRIX, _CLASSES, _ = build_final_equity_matrix(fast_iterations=60, blocker_iterations=60, seed=7)
 
 

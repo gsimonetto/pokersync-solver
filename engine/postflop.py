@@ -193,9 +193,22 @@ class PostflopSolver:
     def __init__(self, board, range_oop: dict, range_ip: dict, pot: float,
                  stack_oop: float, stack_ip: float, bet_sizes=(0.33, 0.75, 1.5), seed=42):
         self.board0 = tuple(parse_board(board))
+        if pot <= 0 or stack_oop <= 0 or stack_ip <= 0:
+            raise ValueError("pot e stacks precisam ser positivos")
         self.pot0 = pot
-        self.stack_oop = stack_oop
-        self.stack_ip = stack_ip
+        # Correcao (2026-09): heads-up so' importa o stack EFETIVO (o menor
+        # dos dois) -- quem tem mais nunca consegue arriscar mais do que o
+        # outro tem. Antes cada um usava o proprio stack: com stacks
+        # diferentes, uma aposta maior que o stack do oponente era "paga"
+        # por inteiro (ex: IP com 10 fichas perdia 15 num call) e o
+        # jogador que ja' estava all-in ainda podia "foldar" contra um
+        # raise. Os valores informados continuam guardados em
+        # stack_*_input (so' pra registro).
+        self.stack_oop_input = stack_oop
+        self.stack_ip_input = stack_ip
+        effective = min(stack_oop, stack_ip)
+        self.stack_oop = effective
+        self.stack_ip = effective
         self.bet_sizes = list(bet_sizes)
         self.rng = random.Random(seed)
 
@@ -276,7 +289,15 @@ class PostflopSolver:
         strat = infoset.get_strategy(own_p)
 
         folder = "oop" if is_oop else "ip"
-        u_fold = self._terminal_fold(folder, bet_amt, bet_amt, self.pot0)
+        # Correcao (2026-09): quem folda perde TUDO que ja' colocou na mao
+        # (ruas anteriores + a aposta desta rua), e o raiser recebe de volta
+        # o excesso do raise -- os dois ficam com `bettor_committed`
+        # comprometido. Antes usava so' `bet_amt` (a aposta desta rua): no
+        # river/raiz dava na mesma (nada comprometido antes), mas no turn/
+        # flop, depois de um bet-call numa rua anterior, o fold ficava
+        # barato demais (ex: perdia 10 em vez de 15).
+        bettor_committed = committed_oop if is_oop else committed_ip
+        u_fold = self._terminal_fold(folder, bettor_committed, bettor_committed, self.pot0)
         u_call = self._end_of_action(ca, cb, matched, matched, p_oop, p_ip, board, prefix + "|allin")
 
         node_oop = strat[0] * u_fold[0] + strat[1] * u_call[0]
@@ -540,7 +561,10 @@ class PostflopSolver:
         """Espelha _node_facing_raise. `bettor` decide fold/call contra o
         raise -- se bettor==br, e' decisao de `br` (pega o maximo); senao
         e' o oponente (le a estrategia media treinada, por classe)."""
-        u_fold_pair = self._terminal_fold(bettor, bet_amt, bet_amt, self.pot0)
+        # mesma correcao de _node_facing_raise: fold perde tudo que o
+        # bettor ja' colocou (ruas anteriores inclusas), nao so' bet_amt
+        bettor_committed = committed_oop if bettor == "oop" else committed_ip
+        u_fold_pair = self._terminal_fold(bettor, bettor_committed, bettor_committed, self.pot0)
         u_fold_for_br = u_fold_pair[0] if br == "oop" else u_fold_pair[1]
 
         if bettor == br:

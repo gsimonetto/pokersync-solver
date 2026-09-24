@@ -1,0 +1,7 @@
+# Só o necessário pra treinar no PC com run_offline_all_positions.py /
+# run_offline_multiway.py (o motor multiway não usa numpy, supabase,
+# fastapi nem uvicorn). Menos coisa pra instalar = menos chance de erro de
+# instalação (ex: pacotes que precisam de compilador no Windows).
+# Pra usar --upload (subir pro Supabase), instale o requirements.txt
+# completo.
+treys>=0.1.8

@@ -3,12 +3,24 @@ Exemplo de treino offline de longa duração — pensado pra rodar no seu
 PC (não no sandbox), por horas, dias ou semanas.
 
 Uso:
-    python3 run_offline_multiway.py
+    python run_offline_multiway.py                 # treina (e retoma, se já tiver começado)
+    python run_offline_multiway.py --iteracoes 200000
 
 Ajuste MATCHUP_CONFIG abaixo pro spot que você quer resolver (squeeze,
-CO vs BTN, UTG vs BB, etc). Salva checkpoint a cada N iterações, então
-se o processo for interrompido (PC desligou, travou), você roda de
-novo e ele continua de onde parou -- não perde o progresso.
+CO vs BTN, UTG vs BB, etc). Salva checkpoint a cada ~10 minutos, então
+se o processo for interrompido (PC desligou, travou, Ctrl+C), você roda
+de novo e ele continua de onde parou -- não perde o progresso. Mesmas
+proteções de run_offline_all_positions.py (ver offline_common.py):
+checkpoint atômico, versão do motor conferida, arquivo antigo/estragado
+renomeado em vez de quebrar.
+
+Se você MUDAR o MATCHUP_CONFIG depois de começar, o checkpoint antigo não
+serve pro spot novo: o script detecta, renomeia o antigo e recomeça.
+
+Resultado final: resultado_multiway_exemplo.pkl (dict com strategy,
+exploitability por seat, checagem de convergência -- mesmo formato dos
+resultado_*.pkl de run_offline_all_positions.py). Até 2026-09-24 era
+resultado_final.pkl só com a estratégia, sem a checagem obrigatória.
 
 IMPORTANTE (documentado no motor): mãos "de fronteira" (EV de
 fold≈EV de agir, quase indiferentes) podem oscilar bastante entre
@@ -18,14 +30,19 @@ devem convergir de forma estável; se ISSO não estabilizar mesmo
 depois de milhões de iterações, aí sim vale investigar.
 """
 
-import pickle
+import argparse
 import sys
-import time
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-from engine.multiway_rfi import MultiwayRfiSolver
-from engine.equity_final import build_final_equity_matrix
+BASE_DIR = Path(__file__).resolve().parent
+sys.path.insert(0, str(BASE_DIR))
+
+from offline_common import GracefulStop, check_python_version, train_and_evaluate  # noqa: E402
+
+check_python_version()  # antes de importar o motor (usa sintaxe de 3.10+)
+
+from engine.hand_classes import all_hand_classes  # noqa: E402
+from engine.multiway_rfi import ENGINE_VERSION, MultiwayRfiSolver  # noqa: E402
 
 MATCHUP_CONFIG = {
     "seat_names": ["opener", "MP", "BB"],
@@ -37,65 +54,29 @@ MATCHUP_CONFIG = {
     "effective_stack": 25,
 }
 
+LABEL = "multiway_exemplo"
 TOTAL_ITERATIONS = 5_000_000
-CHECKPOINT_EVERY = 50_000
-CHECKPOINT_PATH = Path("checkpoint_multiway.pkl")
-EQUITY_MATRIX_PATH = Path("data/equity_matrix_cache.pkl")
-
-
-def load_or_build_equity_matrix():
-    if EQUITY_MATRIX_PATH.exists():
-        print("Carregando matriz de equity ja calculada...")
-        with open(EQUITY_MATRIX_PATH, "rb") as f:
-            d = pickle.load(f)
-        return d["matrix"], d["classes"]
-    print("Construindo matriz de equity pairwise com blockers (só na primeira vez, ~4min)...")
-    matrix, classes, _stats = build_final_equity_matrix()
-    EQUITY_MATRIX_PATH.parent.mkdir(exist_ok=True)
-    with open(EQUITY_MATRIX_PATH, "wb") as f:
-        pickle.dump({"matrix": matrix, "classes": classes}, f)
-    return matrix, classes
 
 
 def main():
-    equity_matrix, classes = load_or_build_equity_matrix()
+    parser = argparse.ArgumentParser(description="Treino offline de um spot multiway (MATCHUP_CONFIG).")
+    parser.add_argument("--iteracoes", type=int, default=TOTAL_ITERATIONS)
+    parser.add_argument("--pasta", type=Path, default=BASE_DIR)
+    args = parser.parse_args()
+    if args.iteracoes <= 0:
+        sys.exit("ERRO: --iteracoes precisa ser positivo")
+    out_dir = args.pasta.resolve()
+    out_dir.mkdir(parents=True, exist_ok=True)
 
-    if CHECKPOINT_PATH.exists():
-        print(f"Retomando checkpoint existente: {CHECKPOINT_PATH}")
-        with open(CHECKPOINT_PATH, "rb") as f:
-            state = pickle.load(f)
-        solver = state["solver"]
-        done_iterations = state["done_iterations"]
-    else:
-        print("Comecando do zero...")
-        solver = MultiwayRfiSolver(
-            equity_matrix=equity_matrix, classes=classes, **MATCHUP_CONFIG,
-        )
-        done_iterations = 0
+    classes = all_hand_classes()
 
-    print(f"Progresso: {done_iterations}/{TOTAL_ITERATIONS} iteracoes ja feitas")
+    def make_solver():
+        return MultiwayRfiSolver(equity_matrix=None, classes=classes, **MATCHUP_CONFIG)
 
-    while done_iterations < TOTAL_ITERATIONS:
-        batch = min(CHECKPOINT_EVERY, TOTAL_ITERATIONS - done_iterations)
-        t0 = time.time()
-        solver.train(iterations=batch, seed=done_iterations + 1, start_t=done_iterations + 1)
-        done_iterations += batch
-        dt = time.time() - t0
-
-        with open(CHECKPOINT_PATH, "wb") as f:
-            pickle.dump({"solver": solver, "done_iterations": done_iterations}, f)
-
-        pct = 100 * done_iterations / TOTAL_ITERATIONS
-        eta_min = (TOTAL_ITERATIONS - done_iterations) / batch * dt / 60
-        print(f"[{pct:5.1f}%] {done_iterations}/{TOTAL_ITERATIONS} "
-              f"({dt:.1f}s neste lote, cache equity={len(solver._equity_cache)}, "
-              f"ETA ~{eta_min:.0f}min)")
-
-    print("\nTreino concluido. Estrategia final salva no checkpoint.")
-    strat = solver.average_strategy()
-    with open("resultado_final.pkl", "wb") as f:
-        pickle.dump(strat, f)
-    print("Salvo em resultado_final.pkl")
+    print(f"Motor {ENGINE_VERSION}. Spot: {MATCHUP_CONFIG['seat_names']}, alvo {args.iteracoes:,} iterações. "
+          f"Arquivos em: {out_dir}\n", flush=True)
+    with GracefulStop() as stop:
+        train_and_evaluate(LABEL, MATCHUP_CONFIG, args.iteracoes, out_dir, make_solver, ENGINE_VERSION, stop)
 
 
 if __name__ == "__main__":

@@ -6,89 +6,88 @@ o resto da tabela.
 
 PENSADO PRA RODAR NO SEU COMPUTADOR, NÃO NO SANDBOX.
 
-MEDIDO (2026-08, no sandbox, matchup mais RÁPIDO da fila — CO vs BB,
-4 seats): ~9-11 iterações/segundo. Nessa taxa, os 5 milhões de
-iterações do alvo padrão levariam a casa de VÁRIOS DIAS só pra essa
-combinação -- e é a mais rápida da fila (UTG vs BB, com 8 seats,
-deve ser bem mais lenta ainda). "Rodar uma noite" NÃO vai terminar
-nem uma combinação inteira -- e tudo bem, é exatamente pra isso que
-existe checkpoint: cada noite que você deixar rodando soma progresso,
-sem perder nada, não importa quantas vezes for interrompido.
-Seu PC provavelmente é mais rápido que o sandbox, mas não espere uma
-diferença de ordens de grandeza -- isso aqui é trabalho de dias a
-semanas por natureza (mesma expectativa que run_offline_multiway.py
-já documentava antes desse script existir).
+## O que mudou em 2026-09-24 (auditoria)
 
-Se preferir um alvo mais realista pra começar (aceitando convergência
-pior, do jeito que aconteceu com o Flop antes de validar), edite
-`TOTAL_ITERATIONS` mais abaixo pra um número menor -- o script
-funciona igual, só termina mais rápido (e menos confiável).
+- HJ, MP, UTG+1 e UTG TRAVAVAM logo na primeira mão (ZeroDivisionError no
+  ICM quando 3+ jogadores quebram na mesma mão). Corrigido em engine/icm.py.
+- Treino ~15-20x mais rápido (avaliador de mão novo, engine/fast_eval.py,
+  com a MESMA ordem de mãos do treys -- testado nas 2,6 milhões de mãos de
+  5 cartas). Memória limitada (antes UTG enchia dezenas de GB).
+- Checkpoint à prova de queda de energia e de mudança de versão (ver
+  offline_common.py): arquivo antigo/estragado é renomeado, nunca apagado,
+  e o treino recomeça com um aviso claro em vez de quebrar.
+- Resultados (resultado_*.pkl) gerados ANTES dessas correções são
+  refeitos automaticamente (o arquivo antigo é renomeado pra
+  resultado_*.pkl.versao-antiga-<data>, não é apagado).
+- Ctrl+C agora salva o checkpoint e sai limpo.
 
 ## Como usar
 
-1. Confere se as dependências estão instaladas (mesma coisa de sempre):
+1. Dependências (Python 3.10 ou mais novo). Pra SÓ treinar no PC basta:
    ```
-   python3 -m venv .venv
-   source .venv/bin/activate      # no Windows: .venv\\Scripts\\activate
-   pip install -r requirements.txt
+   python -m venv .venv
+   .venv\\Scripts\\activate          # Windows  (Linux/Mac: source .venv/bin/activate)
+   pip install -r requirements-offline.txt
+   ```
+   (requirements.txt completo também serve; o offline só precisa do treys
+   e do numpy. Pra usar --upload precisa do supabase também.)
+
+2. Roda:
+   ```
+   python run_offline_all_positions.py
    ```
 
-2. Roda o script:
-   ```
-   python3 run_offline_all_positions.py
-   ```
+3. Deixa rodando. Ele mostra o progresso (%, iterações/segundo, tempo que
+   falta) a cada checkpoint (~10 minutos).
 
-3. Deixa rodando (a noite inteira, o quanto der). Ele imprime o
-   progresso de tempos em tempos, tipo:
-   ```
-   [CO_vs_BB @ 15bb]  42.3%  2115000/5000000  ETA ~38min
-   ```
+4. Pode fechar o terminal/desligar o PC a qualquer momento — na próxima
+   vez ele CONTINUA de onde parou (perde no máximo os ~10 minutos desde o
+   último checkpoint). Ctrl+C salva antes de sair.
 
-4. Pode fechar o terminal/desligar o PC a qualquer momento — na
-   próxima vez que rodar `python3 run_offline_all_positions.py`, ele
-   CONTINUA de onde parou (não do zero), graças aos arquivos de
-   checkpoint (`checkpoint_<posição>_<stack>bb.pkl`, um por
-   combinação, salvos nesta mesma pasta).
+5. Quando uma combinação posição+stack termina o treino, ele roda a
+   avaliação final obrigatória (exploitability + checagem de convergência
+   de todas as decisões, ver CLAUDE.md), salva resultado_<posição>_<stack>bb
+   _ante0.125.pkl e passa pra próxima da fila sozinho.
 
-5. Quando uma combinação posição+stack termina, ele salva o resultado
-   final em `resultado_<posição>_<stack>bb.pkl` e passa pra próxima da
-   fila sozinho. Não precisa fazer nada — só deixar rodando.
+6. Pra subir pro Supabase: `python run_offline_all_positions.py --upload`
+   (use `--upload --dry-run` antes pra conferir o que vai subir, sem enviar).
 
-6. Quando quiser parar de vez (ou quando eu for buscar os resultados
-   pra subir pro Supabase), me avisa quais arquivos `resultado_*.pkl`
-   já existem na pasta.
+Opções úteis:
+  --posicoes CO,HJ     só essas posições (padrão: todas, na ordem da fila)
+  --stacks 15,25       só esses stacks (padrão: 15,25,40,60)
+  --iteracoes 200000   alvo de iterações por combinação (padrão: 1.000.000)
+  --pasta CAMINHO      onde ficam checkpoints/resultados (padrão: a pasta
+                       deste script, mesmo lugar de antes)
 
 ## Ordem da fila
 
-Da posição mais rápida (menos jogadores pulados) pra mais lenta —
-assim, se não der tempo de terminar tudo, o que já rodou é o que
-converge mais rápido e sobra mais tempo pras posições difíceis nas
-próximas noites:
+Da posição mais rápida (menos jogadores) pra mais lenta:
 
-  CO vs BB (pula BTN, SB)              — mais rápido
-  HJ vs BB (pula CO, BTN, SB)
-  MP vs BB (pula HJ, CO, BTN, SB)
-  UTG+1 vs BB (pula MP, HJ, CO, BTN, SB)
-  UTG vs BB (pula UTG+1, MP, HJ, CO, BTN, SB)  — mais lento
+  CO vs BB (4 seats: CO, BTN, SB, BB)      — mais rápido
+  HJ vs BB (5 seats)
+  MP vs BB (6 seats)
+  UTG+1 vs BB (7 seats)
+  UTG vs BB (8 seats)                      — mais lento
 
-Pra cada posição, resolve os 4 stacks já usados em produção: 15bb,
-25bb, 40bb, 60bb (também do mais rápido pro mais devagar: stack menor
-converge mais rápido que stack maior).
-
-Ajuste `POSITIONS_QUEUE`/`STACKS` no final do arquivo se quiser mudar
-a ordem, adicionar/remover alguma combinação, ou focar só numa
-posição específica primeiro.
+Pra cada posição, os 4 stacks já usados em produção: 15, 25, 40 e 60bb.
 """
 
-import pickle
+import argparse
 import sys
-import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-from engine.multiway_rfi import MultiwayRfiSolver  # noqa: E402
-from engine.equity_final import build_final_equity_matrix  # noqa: E402
+BASE_DIR = Path(__file__).resolve().parent
+sys.path.insert(0, str(BASE_DIR))
+
+from offline_common import (  # noqa: E402
+    GracefulStop, check_python_version, load_result, train_and_evaluate,
+)
+
+check_python_version()  # antes de importar o motor (usa sintaxe de 3.10+)
+
+from engine.hand_classes import all_hand_classes  # noqa: E402
+from engine.multiway_rfi import ENGINE_VERSION, MultiwayRfiSolver  # noqa: E402
 
 # Ordem de ação preflop (8-max): UTG, UTG+1, MP, HJ, CO, BTN, SB, BB.
 # Pra cada posição de abertura, os seats modelados são ela mesma + todo
@@ -115,7 +114,9 @@ def build_matchup_config(opener: str, stack: float) -> dict:
     seat_posts = [0.0] * (n - 2) + [0.5, 1.0]
     # "outros jogadores" que ja foldaram antes do abridor (nao
     # modelados, so contam pro contexto de ICM da mesa) -- mesma
-    # convencao ja usada nos jobs de 2 jogadores (other_stacks).
+    # convencao ja usada nos jobs de 2 jogadores (other_stacks): mesa de
+    # ICM com 6 jogadores enquanto os seats modelados cabem (CO/HJ/MP);
+    # UTG+1 e UTG modelam 7 e 8 seats, entao a mesa de ICM fica com 7/8.
     other_stacks = [40.0, 25.0, 18.0, 12.0][: max(0, 6 - n)]
     return {
         "seat_names": seats,
@@ -130,93 +131,9 @@ def build_matchup_config(opener: str, stack: float) -> dict:
 
 
 TOTAL_ITERATIONS = 1_000_000
-CHECKPOINT_EVERY = 50_000
-EQUITY_MATRIX_PATH = Path("data/equity_matrix_cache.pkl")
+CHECKPOINT_MINUTES = 10
 
-
-def load_or_build_equity_matrix():
-    if EQUITY_MATRIX_PATH.exists():
-        print("Carregando matriz de equity já calculada...")
-        with open(EQUITY_MATRIX_PATH, "rb") as f:
-            d = pickle.load(f)
-        return d["matrix"], d["classes"]
-    print("Construindo matriz de equity pairwise com blockers (só na primeira vez, alguns minutos)...")
-    matrix, classes, _stats = build_final_equity_matrix()
-    EQUITY_MATRIX_PATH.parent.mkdir(exist_ok=True)
-    with open(EQUITY_MATRIX_PATH, "wb") as f:
-        pickle.dump({"matrix": matrix, "classes": classes}, f)
-    return matrix, classes
-
-
-def run_one(label: str, config: dict, equity_matrix, classes):
-    result_path = Path(f"resultado_{label}.pkl")
-    if result_path.exists():
-        print(f"[{label}] já tem resultado final ({result_path}) -- pulando.")
-        return
-
-    checkpoint_path = Path(f"checkpoint_{label}.pkl")
-    if checkpoint_path.exists():
-        print(f"[{label}] retomando checkpoint existente...")
-        with open(checkpoint_path, "rb") as f:
-            state = pickle.load(f)
-        solver = state["solver"]
-        done_iterations = state["done_iterations"]
-    else:
-        print(f"[{label}] começando do zero ({len(config['seat_names'])} seats: {config['seat_names']})...")
-        solver = MultiwayRfiSolver(equity_matrix=equity_matrix, classes=classes, **config)
-        done_iterations = 0
-
-    while done_iterations < TOTAL_ITERATIONS:
-        batch = min(CHECKPOINT_EVERY, TOTAL_ITERATIONS - done_iterations)
-        t0 = time.time()
-        solver.train(iterations=batch, seed=done_iterations + 1, start_t=done_iterations + 1)
-        done_iterations += batch
-        dt = time.time() - t0
-
-        with open(checkpoint_path, "wb") as f:
-            pickle.dump({"solver": solver, "done_iterations": done_iterations}, f)
-
-        pct = 100 * done_iterations / TOTAL_ITERATIONS
-        eta_min = (TOTAL_ITERATIONS - done_iterations) / batch * dt / 60
-        print(f"  [{label}] {pct:5.1f}%  {done_iterations}/{TOTAL_ITERATIONS}  "
-              f"({dt:.1f}s neste lote, ETA ~{eta_min:.0f}min)")
-
-    strat = solver.average_strategy()
-    print(f"  [{label}] calculando exploitability (best response por seat, Monte Carlo)...")
-    br_by_seat = solver.compute_exploitability(strat)
-    exploitability = sum(br_by_seat.values())
-
-    # Checagem OBRIGATORIA (ver CLAUDE.md): confere, mao por mao, TODAS as
-    # decisoes do motor (abridor em fase 1, os outros seats em fase 1, e
-    # call/fold de qualquer seat em fase 2) contra o valor real calculado
-    # via best-response. Mesmo com o CFR+ (ver InfoSet.update_regret), uma
-    # mao pode ocasionalmente ficar travada numa decisao pior -- essa
-    # checagem existe pra pegar isso ANTES de considerar o resultado
-    # pronto pra uso, nao depois.
-    print(f"  [{label}] rodando checagem de convergencia (abridor + outros seats + fase 2, todas as 169 maos)...")
-    sanity_flags = solver.check_full_convergence()
-    total_flags = sum(len(v) for v in sanity_flags.values())
-    if total_flags:
-        print(f"  [{label}] ATENCAO: {total_flags} decisao(oes) com direcao errada:")
-        for categoria, flags_lista in sanity_flags.items():
-            for f_ in sorted(flags_lista, key=lambda x: -abs(x["gap"])):
-                extra = f" (seat {f_['seat']}" + (f" vs jam de {f_['jammer']})" if "jammer" in f_ else ")") if "seat" in f_ else ""
-                print(f"      [{categoria}]{extra} {f_['hand']}: gap={f_['gap']:+.3f}  freq_treinada={f_['trained_freq']:.4f}")
-    else:
-        print(f"  [{label}] checagem de convergencia: OK, nenhuma decisao suspeita.")
-
-    with open(result_path, "wb") as f:
-        pickle.dump({
-            "config": config, "strategy": strat, "iterations": done_iterations,
-            "exploitability": exploitability, "best_response_by_seat": br_by_seat,
-            "sanity_flags": sanity_flags,
-        }, f)
-    checkpoint_path.unlink(missing_ok=True)
-    print(f"[{label}] CONCLUÍDO -- exploitability={exploitability:.3f} -- "
-          f"{total_flags} decisao(oes) suspeita(s) -- salvo em {result_path}\n")
-
-
-ENGINE_VERSION_MULTIWAY = "pokersync-solver-v0.1.0-multiway-ante"
+ENGINE_VERSION_MULTIWAY = "pokersync-solver-v0.2.0-multiway-ante"
 
 # Fila do mais rápido (menos seats) pro mais lento.
 POSITIONS_QUEUE = ["CO", "HJ", "MP", "UTG+1", "UTG"]
@@ -225,6 +142,18 @@ STACKS = [15.0, 25.0, 40.0, 60.0]
 
 def label_for(opener: str, stack: float) -> str:
     return f"{opener.replace('+', 'p')}_vs_BB_{int(stack)}bb_ante{ANTE_BB}"
+
+
+def make_solver_factory(config: dict):
+    classes = all_hand_classes()
+
+    def make():
+        # equity_matrix=None: o motor multiway calcula a equity de cada
+        # showdown na hora (ver _multiway_eq) -- a matriz pairwise que os
+        # scripts montavam antes (3-4 min na primeira vez, cache em
+        # data/equity_matrix_cache.pkl) nunca era usada por ele.
+        return MultiwayRfiSolver(equity_matrix=None, classes=classes, **config)
+    return make
 
 
 def build_drill_row(label: str, config: dict, strat: dict, exploitability: float) -> dict:
@@ -238,11 +167,11 @@ def build_drill_row(label: str, config: dict, strat: dict, exploitability: float
     consome spot nenhum desse motor multiway)."""
     seat_names = config["seat_names"]
     pot = sum(p for p in config["seat_posts"] if p > 0) + config.get("ante_pool", 0.0)
-    # phase2 agora tem uma ficha de fold/call por seat POR jammer (quem deu
-    # o all-in e informacao publica, entao a resposta certa depende disso
-    # -- ver comentario em engine/multiway_rfi.py). Aqui isso vira um nivel
-    # a mais no gto_nodes, chaveado pelo nome do seat que jammou (mais legivel
-    # que o indice numerico usado internamente pelo motor).
+    # phase2 tem uma ficha de fold/call por seat POR jammer (quem deu o
+    # all-in e informacao publica, entao a resposta certa depende disso --
+    # ver comentario em engine/multiway_rfi.py). Aqui isso vira um nivel a
+    # mais no gto_nodes, chaveado pelo nome do seat que jammou (mais
+    # legivel que o indice numerico usado internamente pelo motor).
     gto_nodes = {
         seat_names[i]: {
             "phase1": {c: round(strat["phase1"][i][c], 4) for c in strat["phase1"][i]},
@@ -267,61 +196,106 @@ def build_drill_row(label: str, config: dict, strat: dict, exploitability: float
         "position": f"{opener}_vs_BB",
         "street": "Preflop",
         "action": "rfi_multiway",
-        "engine_version": ENGINE_VERSION_MULTIWAY,
+        "engine_version": f"{ENGINE_VERSION_MULTIWAY}+{ENGINE_VERSION}",
         "exploitability": round(exploitability, 3),
         "solver_job_id": None,
         "generated_at": datetime.now(timezone.utc).isoformat(),
     }
 
 
-def upload_results():
-    from jobs.supabase_client import get_client
-
-    client = get_client()
+def upload_results(out_dir: Path, positions, stacks, dry_run: bool):
     rows = []
-    for opener in POSITIONS_QUEUE:
-        for stack in STACKS:
+    for opener in positions:
+        for stack in stacks:
             label = label_for(opener, stack)
-            result_path = Path(f"resultado_{label}.pkl")
+            result_path = out_dir / f"resultado_{label}.pkl"
             if not result_path.exists():
-                print(f"[{label}] resultado_*.pkl ainda não existe -- pulando (rode sem --upload primeiro).")
+                print(f"[{label}] resultado ainda não existe -- pulando (rode o treino primeiro).")
                 continue
-            with open(result_path, "rb") as f:
-                data = pickle.load(f)
+            data, problem = load_result(result_path, ENGINE_VERSION)
+            if problem is not None:
+                print(f"[{label}] NÃO vou subir: {problem}. Rode o treino de novo pra refazer.")
+                continue
+            n_flags = sum(len(v) for v in data.get("sanity_flags", {}).values())
+            if n_flags:
+                print(f"[{label}] AVISO: {n_flags} decisão(ões) apontada(s) pela checagem de convergência "
+                      f"(ver CLAUDE.md) -- confira antes de usar no produto.")
             rows.append(build_drill_row(label, data["config"], data["strategy"], data["exploitability"]))
 
     if not rows:
-        print("Nenhum resultado_*.pkl encontrado ainda -- nada pra subir.")
+        print("Nenhum resultado da versão atual encontrado -- nada pra subir.")
         return
 
-    print(f"Subindo {len(rows)} spots pra tabela drills (spot_id com prefixo rfi_multiway_)...")
-    client.table("drills").insert(rows).execute()
-    print("OK -- upload concluído.")
+    print(f"{len(rows)} spot(s) prontos: " + ", ".join(r["spot_id"] for r in rows))
+    if dry_run:
+        print("--dry-run: nada foi enviado. Rode sem --dry-run pra subir de verdade.")
+        return
+
+    try:
+        from dotenv import load_dotenv
+        load_dotenv(BASE_DIR / ".env")
+    except ImportError:
+        pass
+    import os
+    missing = [k for k in ("SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY") if not os.environ.get(k)]
+    if missing:
+        sys.exit(f"ERRO: faltam as variáveis {', '.join(missing)} (coloque no arquivo .env na pasta "
+                 f"do projeto ou exporte no terminal) -- nada foi enviado.")
+    try:
+        from jobs.supabase_client import get_client
+    except ImportError:
+        sys.exit("ERRO: biblioteca 'supabase' não instalada -- rode `pip install -r requirements.txt` "
+                 "(o requirements-offline.txt não inclui o que o upload precisa).")
+
+    # upsert por spot_id (não insert): subir de novo o mesmo spot ATUALIZA a
+    # linha em vez de dar erro de chave duplicada / criar duplicata.
+    get_client().table("drills").upsert(rows, on_conflict="spot_id").execute()
+    print(f"OK -- {len(rows)} spot(s) enviados (spot_id com prefixo rfi_multiway_).")
+
+
+def _parse_list(text, cast):
+    return [cast(x.strip()) for x in text.split(",") if x.strip()]
 
 
 def main():
-    if "--upload" in sys.argv:
-        upload_results()
+    parser = argparse.ArgumentParser(description="Treino offline do RFI multiway (todas as posições vs BB).")
+    parser.add_argument("--upload", action="store_true", help="sobe os resultados prontos pro Supabase")
+    parser.add_argument("--dry-run", action="store_true", help="com --upload: só mostra, não envia")
+    parser.add_argument("--posicoes", type=lambda t: _parse_list(t, str), default=POSITIONS_QUEUE)
+    parser.add_argument("--stacks", type=lambda t: _parse_list(t, float), default=STACKS)
+    parser.add_argument("--iteracoes", type=int, default=TOTAL_ITERATIONS)
+    parser.add_argument("--pasta", type=Path, default=BASE_DIR)
+    args = parser.parse_args()
+
+    for p in args.posicoes:
+        if p not in POSITIONS_QUEUE:
+            sys.exit(f"ERRO: posição desconhecida {p!r} -- use uma de {', '.join(POSITIONS_QUEUE)}")
+    if args.iteracoes <= 0:
+        sys.exit("ERRO: --iteracoes precisa ser positivo")
+    out_dir = args.pasta.resolve()
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    if args.upload:
+        upload_results(out_dir, args.posicoes, args.stacks, args.dry_run)
         return
 
-    equity_matrix, classes = load_or_build_equity_matrix()
+    jobs = [(opener, stack) for opener in args.posicoes for stack in args.stacks]
+    print(f"Motor {ENGINE_VERSION}. Fila: {len(jobs)} combinação(ões) (posição x stack), "
+          f"{args.iteracoes:,} iterações cada. Arquivos em: {out_dir}\n"
+          f"Pode parar (Ctrl+C) e retomar a qualquer momento.\n", flush=True)
 
-    jobs = [(opener, stack) for opener in POSITIONS_QUEUE for stack in STACKS]
+    with GracefulStop() as stop:
+        for opener, stack in jobs:
+            config = build_matchup_config(opener, stack)
+            status = train_and_evaluate(
+                label_for(opener, stack), config, args.iteracoes, out_dir,
+                make_solver_factory(config), ENGINE_VERSION, stop,
+                checkpoint_minutes=CHECKPOINT_MINUTES,
+            )
+            if status == "stopped":
+                return
 
-    print(f"Fila: {len(jobs)} combinações (posição x stack). "
-          f"Deixa rodando -- pode parar e retomar a qualquer momento.\n")
-
-    for opener, stack in jobs:
-        # sufixo _ante0.125 -- alem do ante em si, esse script agora
-        # corrige um bug separado do motor multiway (blind morto foldado
-        # antes do jam sumia do pote), entao o nome do arquivo tambem
-        # precisa mudar pra nao reaproveitar checkpoint/resultado antigo
-        # (gerado com o motor com bug, mesmo sem ante).
-        label = label_for(opener, stack)
-        config = build_matchup_config(opener, stack)
-        run_one(label, config, equity_matrix, classes)
-
-    print("Fila inteira concluída! Rode com --upload pra subir os spots pro Supabase.")
+    print("Fila inteira concluída! Rode com --upload --dry-run pra conferir e depois --upload pra subir.")
 
 
 if __name__ == "__main__":

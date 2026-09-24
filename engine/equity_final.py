@@ -18,7 +18,7 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from engine.hand_classes import all_hand_classes, representative_combo, hand_vs_hand_equity  # noqa: E402
+from engine.hand_classes import all_hand_classes, representative_combo, representative_combo_avoiding, hand_vs_hand_equity  # noqa: E402
 from engine.equity_blockers import class_vs_class_equity  # noqa: E402
 
 
@@ -41,10 +41,10 @@ def build_final_equity_matrix(fast_iterations=250, blocker_iterations=250, seed=
             eq = class_vs_class_equity(a, b, iterations=blocker_iterations, seed=seed)
             n_shared += 1
         else:
+            # sem valor em comum nunca ha carta repetida entre os
+            # representativos -- o helper so' garante isso explicitamente
             combo_a = representative_combo(a)
-            combo_b = representative_combo(b)
-            if set([combo_a[0:2], combo_a[2:4]]) & set([combo_b[0:2], combo_b[2:4]]):
-                combo_b = combo_b.replace("h", "d") if "h" in combo_b else combo_b.replace("s", "c")
+            combo_b = representative_combo_avoiding(b, [combo_a[0:2], combo_a[2:4]])
             eq = hand_vs_hand_equity(combo_a, combo_b, iterations=fast_iterations, seed=seed)
             n_fast += 1
         matrix[(a, b)] = eq
@@ -62,6 +62,8 @@ if __name__ == "__main__":
     print(f"  Pares com calculo rapido: {stats['fast_pairs']}")
 
     import pickle
-    with open(str(Path(__file__).resolve().parent.parent / "data" / "equity_matrix_final.pkl"), "wb") as f:
+    out = Path(__file__).resolve().parent.parent / "data" / "equity_matrix_final.pkl"
+    out.parent.mkdir(parents=True, exist_ok=True)  # a pasta data/ não vem no git
+    with open(out, "wb") as f:
         pickle.dump({"matrix": matrix, "classes": classes}, f)
     print("Salvo em data/equity_matrix_final.pkl")

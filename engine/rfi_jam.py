@@ -510,9 +510,16 @@ class RfiJamSolver:
 if __name__ == "__main__":
     import pickle
 
-    with open(str(Path(__file__).resolve().parent.parent / "data" / "equity_matrix_final.pkl"), "rb") as f:
-        d = pickle.load(f)
-    equity_matrix, classes = d["matrix"], d["classes"]
+    matrix_path = Path(__file__).resolve().parent.parent / "data" / "equity_matrix_final.pkl"
+    if matrix_path.exists():
+        with open(matrix_path, "rb") as f:
+            d = pickle.load(f)
+        equity_matrix, classes = d["matrix"], d["classes"]
+    else:
+        # sem a matriz salva (a pasta data/ não vem no git): monta na hora
+        from engine.equity_final import build_final_equity_matrix
+        print("data/equity_matrix_final.pkl não existe -- montando a matriz agora (uns segundos)...")
+        equity_matrix, classes, _ = build_final_equity_matrix()
 
     table_stacks = [25, 25, 40, 30, 20, 15]
     payouts = [500.0, 300.0, 200.0]

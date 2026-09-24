@@ -19,12 +19,10 @@ import random
 import sys
 from pathlib import Path
 
-from treys import Card, Evaluator, Deck
-
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from engine.hand_classes import all_hand_classes, combo_count  # noqa: E402
+from engine.fast_eval import eval7  # noqa: E402
 
-EVALUATOR = Evaluator()
 RANKS = "AKQJT98765432"
 SUITS = "shdc"
 
@@ -45,11 +43,21 @@ def class_combos(hand_class: str):
 def class_vs_class_equity(class_a: str, class_b: str, iterations=800, seed=None) -> float:
     """Equity de class_a contra class_b, com blocker real: sorteia um
     combo valido de cada classe (sem conflito de carta entre os dois)
-    a cada iteracao, junto com o board."""
-    if seed is not None:
-        random.seed(seed)
-    combos_a = class_combos(class_a)
-    combos_b = class_combos(class_b)
+    a cada iteracao, junto com o board.
+
+    2026-09: mesma estatistica de antes, mas com o avaliador proprio
+    (engine/fast_eval.py, ordem de maos identica a do treys) e sem criar
+    um treys.Deck() por simulacao -- ~10x mais rapido, e agora
+    reprodutivel com `seed` (o Deck() usava um gerador proprio, semeado
+    pelo sistema, entao a matriz saia diferente a cada construcao mesmo
+    com a mesma seed). `seed` usa um gerador proprio (nao mexe no
+    `random` global)."""
+    from engine.multiway_equity import class_combo_indices
+
+    rng = random.Random(seed) if seed is not None else random
+    rand = rng.random
+    combos_a = class_combo_indices(class_a)
+    combos_b = class_combo_indices(class_b)
 
     wins = 0.0
     valid_iters = 0
@@ -57,22 +65,24 @@ def class_vs_class_equity(class_a: str, class_b: str, iterations=800, seed=None)
     max_attempts = iterations * 5
     while valid_iters < iterations and attempts < max_attempts:
         attempts += 1
-        combo_a_str = random.choice(combos_a)
-        combo_b_str = random.choice(combos_b)
-        card_a = [Card.new(combo_a_str[0:2]), Card.new(combo_a_str[2:4])]
-        card_b = [Card.new(combo_b_str[0:2]), Card.new(combo_b_str[2:4])]
-        used = set(card_a + card_b)
-        if len(used) < 4:
+        a1, a2 = combos_a[int(rand() * len(combos_a))]
+        b1, b2 = combos_b[int(rand() * len(combos_b))]
+        used = (1 << a1) | (1 << a2)
+        if used & ((1 << b1) | (1 << b2)):
             continue  # conflito de carta entre os combos sorteados, tenta outro par
+        used |= (1 << b1) | (1 << b2)
 
-        deck = Deck()
-        deck.cards = [c for c in deck.cards if c not in used]
-        random.shuffle(deck.cards)
-        board = deck.cards[:5]
+        board = []
+        while len(board) < 5:
+            c = int(rand() * 52)
+            if used >> c & 1:
+                continue
+            used |= 1 << c
+            board.append(c)
 
-        score_a = EVALUATOR.evaluate(board, card_a)
-        score_b = EVALUATOR.evaluate(board, card_b)
-        if score_a < score_b:
+        score_a = eval7([a1, a2, *board])
+        score_b = eval7([b1, b2, *board])
+        if score_a > score_b:  # fast_eval: MAIOR = melhor
             wins += 1.0
         elif score_a == score_b:
             wins += 0.5

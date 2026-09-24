@@ -11,40 +11,88 @@ ICM é um cálculo probabilístico bem definido (não faz parte do
 algoritmo de equilíbrio em si), então validamos ele separadamente.
 """
 
-from functools import lru_cache
-
-
-def icm_equity(stacks: list[float], payouts: list[float]) -> list[float]:
+def icm_equity(stacks: list[float], payouts: list[float], bust_tiebreak: list[float] | None = None) -> list[float]:
     """
     stacks: lista de stacks (fichas) de cada jogador, na mesa atual.
     payouts: lista de premios por posicao (payouts[0] = 1o lugar,
              payouts[1] = 2o lugar, etc). len(payouts) pode ser menor
              que len(stacks) (nem todo mundo premiado).
+    bust_tiebreak: opcional, mesma ordem de `stacks` -- criterio de
+             desempate entre jogadores ELIMINADOS na mesma mao (stack
+             final 0). Regra padrao de torneio: quem comecou a mao com
+             MAIS fichas termina na frente; valores iguais empatam e
+             dividem igualmente os premios das posicoes que ocupam. Sem
+             esse parametro, todos os eliminados empatam entre si.
     Retorna: lista de $EV por jogador, na mesma ordem de `stacks`.
+
+    Correcao (2026-09): a versao anterior quebrava com ZeroDivisionError
+    quando 2+ jogadores terminavam com 0 fichas e ainda sobrava premio
+    pra distribuir entre eles (a recursao chegava num grupo so' de
+    stacks zerados e dividia por soma 0). Isso acontece de verdade no
+    treino multiway (ex: HJ vs BB -- 5 jogadores all-in, 1 ganha, 4
+    quebram) e travava o run_offline_all_positions.py logo na primeira
+    iteracao de HJ, MP, UTG+1 e UTG. Agora:
+      - jogadores com fichas disputam as primeiras posicoes pelo
+        Malmuth-Harville normal (mesmos numeros de antes, ate' a ultima
+        casa decimal -- ver tests/icm.py);
+      - jogadores eliminados ficam com as posicoes seguintes, na ordem
+        de `bust_tiebreak` (empate = divide os premios).
+
+    Implementacao por programacao dinamica sobre SUBCONJUNTOS de quem ja
+    foi colocado (em vez de percorrer cada ordem de chegada possivel):
+    mesma formula, mas o custo cai de n!/(n-k)! pra ~2^n no pior caso
+    (ex: mesa final de 9 com 9 premios: 362.880 caminhos -> ~2.300
+    estados). Com poucos premios (o caso comum, 3 pagos) os dois sao
+    rapidos; com muitos premios a versao antiga podia levar minutos por
+    chamada.
     """
     n = len(stacks)
-    stacks_t = tuple(stacks)
-
-    @lru_cache(maxsize=None)
-    def first_place_probs(remaining: tuple) -> tuple:
-        total = sum(stacks_t[i] for i in remaining)
-        return tuple(stacks_t[i] / total for i in remaining)
-
     equity = [0.0] * n
+    if n == 0 or not payouts:
+        return equity
 
-    def recurse(remaining: tuple, payout_idx: int, prob_reach: float):
-        if payout_idx >= len(payouts) or len(remaining) == 0:
-            return
-        if len(remaining) == 1:
-            equity[remaining[0]] += prob_reach * payouts[payout_idx]
-            return
-        probs = first_place_probs(remaining)
-        for idx, p in zip(remaining, probs):
-            equity[idx] += prob_reach * p * payouts[payout_idx]
-            rest = tuple(x for x in remaining if x != idx)
-            recurse(rest, payout_idx + 1, prob_reach * p)
+    alive = [i for i in range(n) if stacks[i] > 0]
+    busted = [i for i in range(n) if not stacks[i] > 0]
 
-    recurse(tuple(range(n)), 0, 1.0)
+    # --- quem tem fichas: Malmuth-Harville por DP de subconjuntos ---
+    # frontier[mascara] = probabilidade de EXATAMENTE os jogadores da
+    # mascara terem ocupado (em qualquer ordem) as primeiras posicoes.
+    m = len(alive)
+    places_alive = min(len(payouts), m)
+    if places_alive > 0:
+        s = [float(stacks[i]) for i in alive]
+        frontier = {0: 1.0}
+        for place in range(places_alive):
+            prize = payouts[place]
+            is_last = place + 1 == places_alive
+            next_frontier: dict[int, float] = {}
+            for mask, p_mask in frontier.items():
+                remaining = [j for j in range(m) if not (mask >> j) & 1]
+                total = sum(s[j] for j in remaining)
+                for j in remaining:
+                    p_j = p_mask * s[j] / total
+                    equity[alive[j]] += p_j * prize
+                    if not is_last:
+                        key = mask | (1 << j)
+                        next_frontier[key] = next_frontier.get(key, 0.0) + p_j
+            frontier = next_frontier
+
+    # --- eliminados: posicoes depois de todos os que tem fichas ---
+    if busted and len(payouts) > m:
+        if bust_tiebreak is None:
+            groups = [busted]
+        else:
+            by_value: dict[float, list[int]] = {}
+            for i in busted:
+                by_value.setdefault(bust_tiebreak[i], []).append(i)
+            groups = [by_value[v] for v in sorted(by_value, reverse=True)]
+        place = m
+        for group in groups:
+            prizes = sum(payouts[k] for k in range(place, min(place + len(group), len(payouts))))
+            for i in group:
+                equity[i] += prizes / len(group)
+            place += len(group)
+
     return equity
 
 

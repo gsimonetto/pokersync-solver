@@ -11,7 +11,13 @@ reinventar avaliação de mão — o "cérebro" do solver (CFR) continua
 """
 
 import random
-from treys import Card, Evaluator, Deck
+import sys
+from pathlib import Path
+
+from treys import Card, Evaluator
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from engine.fast_eval import card_index, eval7  # noqa: E402
 
 EVALUATOR = Evaluator()
 
@@ -23,35 +29,67 @@ def parse_combo(combo: str):
     return [Card.new(combo[0:2]), Card.new(combo[2:4])]
 
 
-def hand_vs_hand_equity(combo_a: str, combo_b: str, iterations=2000, seed=None) -> float:
-    """Equity de combo_a contra combo_b (com cartas específicas, sem
-    conflito de suits) via Monte Carlo, enumerando boards aleatórios."""
-    if seed is not None:
-        random.seed(seed)
-    card_a = parse_combo(combo_a)
-    card_b = parse_combo(combo_b)
-    used = set(card_a + card_b)
+def parse_combo_indices(combo: str) -> tuple[int, int]:
+    """'AhKd' -> (índice, índice) no formato 0..51 de engine/fast_eval.py.
+    Levanta ValueError com mensagem clara pra combo mal formado (ex 'AhK',
+    'ahkd', '1hKd') ou com a mesma carta duas vezes ('AhAh') -- antes isso
+    virava um KeyError solto do treys (erro 500 na API)."""
+    if not isinstance(combo, str) or len(combo.strip()) != 4:
+        raise ValueError(f"combo invalido: {combo!r} (formato esperado: 2 cartas, ex 'AhKd')")
+    combo = combo.strip()
+    c1, c2 = card_index(combo[0:2]), card_index(combo[2:4])
+    if c1 == c2:
+        raise ValueError(f"combo com a mesma carta duas vezes: {combo!r}")
+    return c1, c2
 
-    wins = 0.0
+
+def _sample_board(used_mask: int, rng):
+    """5 cartas distintas fora de `used_mask` (bits 0..51)."""
+    board = []
+    rand = rng.random
+    while len(board) < 5:
+        c = int(rand() * 52)
+        bit = 1 << c
+        if used_mask & bit:
+            continue
+        used_mask |= bit
+        board.append(c)
+    return board
+
+
+def hand_vs_hand_outcomes(combo_a: str, combo_b: str, iterations=2000, seed=None):
+    """(P(a vence), P(empate), P(b vence)) de combo_a contra combo_b, via
+    Monte Carlo sobre a mesa. `seed`: gerador próprio com essa semente (não
+    mexe no `random` global de quem chama). Levanta ValueError se as duas
+    mãos dividem uma carta."""
+    a1, a2 = parse_combo_indices(combo_a)
+    b1, b2 = parse_combo_indices(combo_b)
+    if len({a1, a2, b1, b2}) != 4:
+        raise ValueError(f"as duas mãos dividem uma carta: {combo_a!r} vs {combo_b!r}")
+    rng = random.Random(seed) if seed is not None else random
+    used = (1 << a1) | (1 << a2) | (1 << b1) | (1 << b2)
+    wins = ties = 0
     for _ in range(iterations):
-        deck = Deck()
-        # sorted() antes do shuffle: Deck() do treys usa um Random() PRÓPRIO
-        # (nao ligado ao random.seed() global) só pra embaralhar a ordem
-        # inicial -- sem ordenar antes, o shuffle abaixo (que usa o `random`
-        # global, o único que o parâmetro `seed` desta função controla)
-        # parte de uma ordem diferente a cada chamada, e o resultado final
-        # não é reprodutível mesmo passando o mesmo `seed` duas vezes.
-        deck.cards = sorted(c for c in deck.cards if c not in used)
-        random.shuffle(deck.cards)
-        board = deck.cards[:5]
-        score_a = EVALUATOR.evaluate(board, card_a)
-        score_b = EVALUATOR.evaluate(board, card_b)
-        # treys: menor score = mao melhor
-        if score_a < score_b:
-            wins += 1.0
-        elif score_a == score_b:
-            wins += 0.5
-    return wins / iterations
+        board = _sample_board(used, rng)
+        va = eval7([a1, a2, *board])
+        vb = eval7([b1, b2, *board])
+        if va > vb:
+            wins += 1
+        elif va == vb:
+            ties += 1
+    return wins / iterations, ties / iterations, (iterations - wins - ties) / iterations
+
+
+def hand_vs_hand_equity(combo_a: str, combo_b: str, iterations=2000, seed=None) -> float:
+    """Equity de combo_a contra combo_b (vitória + metade do empate), com
+    cartas específicas, via Monte Carlo sobre a mesa.
+
+    2026-09: avaliador próprio (engine/fast_eval.py, ordem de mãos idêntica
+    à do treys) e mesa sorteada direto das cartas livres -- ~10x mais
+    rápido que criar um treys.Deck() por simulação, e reprodutível com
+    `seed` sem precisar do truque de ordenar o baralho."""
+    p_win, p_tie, _ = hand_vs_hand_outcomes(combo_a, combo_b, iterations, seed)
+    return p_win + 0.5 * p_tie
 
 
 if __name__ == "__main__":
