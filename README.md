@@ -327,7 +327,7 @@ validada em produção o suficiente pra confiar no gap exposto (ver
     inventada. Equity de showdown agora vem de um "oráculo de mesas" por
     mão sorteada (cartas de quem foldou saem do baralho), com avaliador
     próprio `engine/fast_eval.py` (ordem de mãos idêntica ao treys,
-    testado nas 2,6 milhões de mãos de 5 cartas): treino 20-130x mais
+    testado nas 2,6 milhões de mãos de 5 cartas): treino ~57x (CO) a ~130x (UTG) mais
     rápido e sem cache (memória ~20 MB).
   - Showdown em chipEV perdia a perda de quem foldou com dinheiro no pote.
   - Checagem obrigatória e exploitability sorteavam os adversários sem
