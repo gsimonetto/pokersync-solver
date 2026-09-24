@@ -261,7 +261,9 @@ def train_and_evaluate(label: str, config: dict, total_iterations: int, out_dir:
     total_flags = sum(len(v) for v in sanity_flags.values())
     print(f"  [{label}]     feito em {format_duration(t_check)}: {summary.get('checked', 0)} decisões "
           f"checadas, {total_flags} na direção errada, {summary.get('inconclusive', 0)} inconclusivas "
-          f"(diferença dentro do ruído), {summary.get('insufficient_data', 0)} sem dados suficientes.")
+          f"(diferença dentro do ruído), {summary.get('insufficient_data', 0)} sem dados suficientes, "
+          f"{summary.get('rare_nodes_skipped', 0)} situações raras de overcall não checadas "
+          f"(somadas acontecem em {100 * summary.get('rare_nodes_freq', 0.0):.3f}% das mãos).")
     for category, items in sanity_flags.items():
         for f_ in sorted(items, key=lambda x: -abs(x["gap"])):
             who = ""
@@ -269,6 +271,8 @@ def train_and_evaluate(label: str, config: dict, total_iterations: int, out_dir:
                 who = f" {solver.seat_names[f_['seat']]}"
                 if "jammer" in f_:
                     who += f" vs jam de {solver.seat_names[f_['jammer']]}"
+                    if f_.get("callers"):
+                        who += " (já pagaram: " + "+".join(solver.seat_names[c] for c in f_["callers"]) + ")"
             print(f"      ATENÇÃO [{category}]{who} {f_['hand']}: gap={f_['gap']:+.3f} "
                   f"(±{f_['se']:.3f}, {f_['n']} mesas)  freq_treinada={f_['trained_freq']:.4f}")
 

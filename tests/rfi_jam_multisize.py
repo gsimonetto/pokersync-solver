@@ -56,7 +56,10 @@ def build_solver(cls, **kwargs):
 def test_regression_single_size():
     print("--- 1. Regressão: open_sizes=[2.2] vs motor antigo ---")
     legacy = build_solver(RfiJamSolverLegacy, open_size=2.2)
-    new = build_solver(RfiJamSolver, open_sizes=[2.2])
+    # card_removal=False: o motor antigo sorteia as classes de SB e BB de
+    # forma independente; a remocao de cartas (2026-09-24) muda a
+    # distribuicao de proposito, entao a regressao exata so' vale sem ela.
+    new = build_solver(RfiJamSolver, open_sizes=[2.2], card_removal=False)
 
     strat_legacy = legacy.average_strategy()
     strat_new = new.average_strategy()

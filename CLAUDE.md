@@ -131,11 +131,30 @@ resultados de versões anteriores são incompatíveis):
   treys (testado nas 2.598.960 mãos de 5 cartas) -- treino ~15x mais
   rápido.
 
-Limitação conhecida (NÃO corrigida, é decisão de modelagem -- perguntar
-ao usuário antes de mudar): a ficha de fase 2 é (seat, jammer, mão) e não
-distingue se alguém já PAGOU o jam antes (ex: BB pagando um jam do BTN
-sozinho vs depois do SB já ter pago). Na vida real isso é informação
-pública e muda a decisão (overcall precisa de mão mais forte).
+## Motor v4 (2026-09-24, pedido do usuário)
+
+`ENGINE_VERSION = multiway-rfi-v4-2026-09-24` -- resultados/checkpoints v3
+são incompatíveis (o script offline refaz sozinho, o `--upload` recusa).
+
+- **Overcall**: a ficha de fase 2 agora é (seat, jammer, quem JÁ PAGOU,
+  mão) -- `phase2[seat][jammer][callers][classe]`, `callers` = tupla
+  ordenada dos seats que pagaram antes (`()` = ninguém). Nas checagens,
+  cada flag de `phase2` traz também `callers`. Nós que quase nunca
+  acontecem (< `MIN_NODE_FREQ` = 0,01% das mãos) não são checados --
+  contados em `rare_nodes_skipped` no resumo.
+- **Mesa de ICM sempre com 8 ou 9 jogadores** (`--mesa 8|9` no script
+  offline; a API recusa `other_stacks` que não dê 8 ou 9 com ICM). O
+  ante já sai do stack de todo mundo antes do ICM.
+- **Heads-up com remoção de cartas** (`card_removal=True` padrão em
+  `rfi_jam.py`, `pushfold.py`, `pushfold_icm.py`): P(mão do oponente |
+  minha mão) exata, via `engine/card_removal.py`. `card_removal=False`
+  só existe pra testes de regressão contra o motor antigo.
+- **Matriz de equity de produção** (`get_production_equity_matrix()` em
+  `engine/equity_final.py`): todos os pares com carta real, 4000
+  simulações por par, pronta em `engine/data/equity_matrix_169.json`.
+  Os jobs da API usam ela. Spots heads-up gravados no Supabase antes
+  disso foram gerados sem remoção de cartas e com a matriz antiga --
+  precisam ser regerados pelos jobs.
 
 ## Nota sobre `use_cfr_plus`
 

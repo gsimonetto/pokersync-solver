@@ -48,7 +48,7 @@ MATCHUP_CONFIG = {
     "seat_names": ["opener", "MP", "BB"],
     "seat_idx_in_table": [0, 1, 2],
     "seat_posts": [0.0, 0.0, 1.0],
-    "table_stacks": [25, 25, 25, 40, 30, 20],
+    "table_stacks": [25, 25, 25, 40, 30, 20, 18, 12],  # mesa de 8 (ICM sempre com 8 ou 9)
     "payouts": [500.0, 300.0, 200.0],
     "open_size": 2.2,
     "effective_stack": 25,

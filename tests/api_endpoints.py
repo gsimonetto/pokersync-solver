@@ -102,6 +102,32 @@ def test_get_job_inexistente_da_404():
         api_main.get_client = original
 
 
+def test_jobs_icm_exigem_mesa_de_8_ou_9():
+    # a validacao roda ANTES de tocar no banco: mesa curta nem chega no Supabase
+    for path, extra in [("/jobs/pushfold", {}), ("/jobs/rfi_jam", {"matchups": ["sb_vs_bb"]})]:
+        body = {"stacks_bb": [15], "other_stacks": [40, 25, 18, 12], "payouts": [500, 300, 200], **extra}
+        r = _client().post(path, json=body, headers=HEADERS)
+        assert r.status_code == 422 and "8 ou 9" in r.json()["detail"], (path, r.status_code, r.text)
+    # chipEV nao usa a mesa: lista curta continua valendo (checa so' que passou da validacao)
+    original = api_main.get_client
+    calls = []
+
+    class _Recorder:
+        def table(self, name):
+            calls.append(name)
+            raise RuntimeError("parou aqui de proposito")
+    api_main.get_client = lambda: _Recorder()
+    try:
+        body = {"stacks_bb": [15], "other_stacks": [], "use_icm": False}
+        try:
+            _client().post("/jobs/pushfold", json=body, headers=HEADERS)
+        except RuntimeError:
+            pass
+        assert calls == ["solver_jobs"], "chipEV com lista vazia deveria passar da validacao"
+    finally:
+        api_main.get_client = original
+
+
 def test_health():
     assert _client().get("/health").json() == {"status": "ok"}
 
@@ -115,6 +141,8 @@ if __name__ == "__main__":
     print("  OK -- /hands/compute_cev_multiway: 2 eliminados na mesma mao da 200 (antes 500)")
     test_get_job_inexistente_da_404()
     print("  OK -- GET /jobs/{id}: 200 quando existe, 404 quando nao existe (antes 500)")
+    test_jobs_icm_exigem_mesa_de_8_ou_9()
+    print("  OK -- jobs com ICM recusam mesa que nao tenha 8 ou 9 jogadores")
     test_health()
     print("  OK -- /health")
     print("Todos os testes de api_endpoints passaram.")

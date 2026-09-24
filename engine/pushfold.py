@@ -20,10 +20,11 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from engine.hand_classes import all_hand_classes, combo_count, build_equity_matrix  # noqa: E402
+from engine.card_removal import conditional_opponent_weights  # noqa: E402
 
 
 class PushFoldSolver:
-    def __init__(self, stack_bb: float, equity_matrix=None, classes=None):
+    def __init__(self, stack_bb: float, equity_matrix=None, classes=None, card_removal: bool = True):
         self.stack_bb = stack_bb
         if equity_matrix is None or classes is None:
             self.equity_matrix, self.classes = build_equity_matrix(iterations=300)
@@ -32,6 +33,18 @@ class PushFoldSolver:
         self.n = len(self.classes)
         self.weights = np.array([combo_count(c) for c in self.classes], dtype=float)
         self.weights_norm = self.weights / self.weights.sum()
+        # card_removal (2026-09-24): SB e BB recebem cartas do MESMO baralho.
+        # opp_given_sb[a, b] = P(BB tem b | SB tem a); opp_given_bb[a, b] =
+        # P(SB tem a | BB tem b). False = classes independentes (modelo
+        # antigo). Ver engine/card_removal.py.
+        self.card_removal = card_removal
+        if card_removal:
+            cw = conditional_opponent_weights(self.classes)
+            self.opp_given_sb = np.array([[cw[a][b] for b in self.classes] for a in self.classes])
+            self.opp_given_bb = self.opp_given_sb.T.copy()  # P(a|b) = cw[b][a]
+        else:
+            self.opp_given_sb = np.tile(self.weights_norm, (self.n, 1))
+            self.opp_given_bb = np.tile(self.weights_norm[:, np.newaxis], (1, self.n))
 
         # matriz de equity[i][j] = equity da classe i contra a classe j
         self.equity = np.zeros((self.n, self.n))
@@ -68,7 +81,7 @@ class PushFoldSolver:
             # --- valor de SB por classe ---
             ev_fold_sb = -0.5 * np.ones(self.n)
             # EV de push por classe do SB: media sobre classes da BB, ponderada
-            ev_push_sb = (self.weights_norm[np.newaxis, :] *
+            ev_push_sb = (self.opp_given_sb *
                           (chip_ev_call * bb_call_prob[np.newaxis, :] +
                            1.0 * (1 - bb_call_prob)[np.newaxis, :])).sum(axis=1)
 
@@ -78,16 +91,15 @@ class PushFoldSolver:
 
             # --- valor de BB por classe (condicionado a SB ter dado push) ---
             sb_push_prob = sb_strategy[:, 1]
-            reach_sb = self.weights_norm * sb_push_prob  # peso de cada classe do SB, dado que empurrou
+            reach_sb = self.opp_given_bb * sb_push_prob[:, np.newaxis]  # [sb][bb]: P(sb|bb)*push
 
             ev_fold_bb = -1.0 * np.ones(self.n)  # constante, nao depende da classe da BB
             # chip_ev_call[i][j] = EV do SB (classe i) vs BB (classe j); para BB e o negativo
             chip_ev_call_bb = -chip_ev_call  # [sb_class][bb_class] -> BB perspective
-            reach_sum = reach_sb.sum()
-            if reach_sum > 0:
-                ev_call_bb = (reach_sb[:, np.newaxis] * chip_ev_call_bb).sum(axis=0) / reach_sum
-            else:
-                ev_call_bb = np.zeros(self.n)
+            reach_sum = reach_sb.sum(axis=0)  # por classe do BB
+            # classe da BB que nunca ve push (reach 0) fica com o valor neutro
+            ev_call_bb = np.divide((reach_sb * chip_ev_call_bb).sum(axis=0), reach_sum,
+                                   out=np.zeros(self.n), where=reach_sum > 0)
 
             node_value_bb = bb_strategy[:, 0] * ev_fold_bb + bb_strategy[:, 1] * ev_call_bb
             # regret ponderado pelo alcance (reach_sum) -- reflete o quanto
@@ -136,18 +148,17 @@ class PushFoldSolver:
         chip_ev_call = self.stack_bb * (2 * self.equity - 1)  # [sb_class][bb_class]
 
         bb_call_prob = np.array([strat["bb_call"][c] for c in self.classes])
-        ev_push_sb = (self.weights_norm[np.newaxis, :] *
+        ev_push_sb = (self.opp_given_sb *
                       (chip_ev_call * bb_call_prob[np.newaxis, :] +
                        1.0 * (1 - bb_call_prob)[np.newaxis, :])).sum(axis=1)
 
         sb_push_prob = np.array([strat["sb_push"][c] for c in self.classes])
-        reach_sb = self.weights_norm * sb_push_prob
-        reach_sum = reach_sb.sum()
+        reach_sb = self.opp_given_bb * sb_push_prob[:, np.newaxis]  # [sb][bb]: P(sb|bb)*push
+        reach_sum = reach_sb.sum(axis=0)  # por classe do BB
         chip_ev_call_bb = -chip_ev_call
-        if reach_sum > 0:
-            ev_call_bb = (reach_sb[:, np.newaxis] * chip_ev_call_bb).sum(axis=0) / reach_sum
-        else:
-            ev_call_bb = np.zeros(self.n)
+        # classe da BB que nunca ve push (reach 0) fica com o valor neutro
+        ev_call_bb = np.divide((reach_sb * chip_ev_call_bb).sum(axis=0), reach_sum,
+                               out=np.zeros(self.n), where=reach_sum > 0)
 
         return {
             "sb_ev_fold": -0.5,

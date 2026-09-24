@@ -99,7 +99,7 @@ await fetch(`${SOLVER_API_URL}/jobs/pushfold`, {
   },
   body: JSON.stringify({
     stacks_bb: [10, 15, 20],
-    other_stacks: [40, 25, 18, 12],
+    other_stacks: [40, 25, 18, 12, 30, 20], // 6 ou 7 stacks: mesa de 8 ou 9 (obrigatorio com ICM)
     payouts: [500, 300, 200],
   }),
 });
@@ -334,8 +334,22 @@ validada em produção o suficiente pra confiar no gap exposto (ver
     condicionar no que já tinha acontecido (ex: mão do abridor de
     qualquer lugar do baralho) e apontavam mão marginal por ruído —
     corrigido (ver CLAUDE.md, "checagem v3").
-  - **Limitação que continua** (decisão de modelagem, não bug): a ficha
-    de fase 2 não distingue se alguém já pagou o jam antes (overcall).
+- ✅ **(2026-09-24) Motor v4** (versão `multiway-rfi-v4-2026-09-24`;
+  resultados v3 são refeitos sozinhos pelos scripts):
+  - **Overcall**: a decisão de pagar um all-in agora depende de quem já
+    pagou antes (BB pagando sozinho vs depois do SB já ter pago são
+    decisões separadas). No `resultado_*.pkl` / drill, `phase2_vs_jam`
+    fica `{jammer: {"ninguem" | "SB+BB" ...: {mão: freq}}}`.
+  - **Mesa de ICM sempre com 8 ou 9 jogadores** (`--mesa 8` padrão ou
+    `--mesa 9` no `run_offline_all_positions.py`; a API recusa jobs com
+    ICM cuja mesa não tenha 8 ou 9). spot_id ganha o sufixo `_8max`/`_9max`.
+  - **Heads-up (RFI/jam e push/fold) com remoção de cartas**: se você
+    tem um Ás, o oponente tem Ás menos vezes (como HRC/ICMIZER fazem).
+  - **Matriz de equity mais precisa** nos jobs (todos os pares com
+    carta real, 4000 simulações por par; antes 250 — erro de ~3 pontos
+    de equity por par). Vem pronta em `engine/data/equity_matrix_169.json`.
+    **Spots heads-up já gravados no Supabase precisam ser regerados**
+    pelos jobs pra pegar essas duas melhorias.
 - ✅ **chipEV puro (sem ICM)** — RFI/jam (`RfiJamSolver(use_icm=False)`),
   multiway (`MultiwayRfiSolver(use_icm=False)`) e Push/Fold
   (`engine/pushfold.py::PushFoldSolver`, motor separado, já existia)

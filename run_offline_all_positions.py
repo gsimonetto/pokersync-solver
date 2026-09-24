@@ -53,6 +53,7 @@ PENSADO PRA RODAR NO SEU COMPUTADOR, NÃO NO SANDBOX.
    (use `--upload --dry-run` antes pra conferir o que vai subir, sem enviar).
 
 Opções úteis:
+  --mesa 9            mesa de 9 jogadores (padrão: 8; a 9 inclui UTG+2)
   --posicoes CO,HJ     só essas posições (padrão: todas, na ordem da fila)
   --stacks 15,25       só esses stacks (padrão: 15,25,40,60)
   --iteracoes 200000   alvo de iterações por combinação (padrão: 1.000.000)
@@ -89,44 +90,60 @@ check_python_version()  # antes de importar o motor (usa sintaxe de 3.10+)
 from engine.hand_classes import all_hand_classes  # noqa: E402
 from engine.multiway_rfi import ENGINE_VERSION, MultiwayRfiSolver  # noqa: E402
 
-# Ordem de ação preflop (8-max): UTG, UTG+1, MP, HJ, CO, BTN, SB, BB.
-# Pra cada posição de abertura, os seats modelados são ela mesma + todo
-# mundo entre ela e a BB (na ordem em que agem), + a BB no final.
-ACTION_ORDER = ["UTG", "UTG+1", "MP", "HJ", "CO", "BTN", "SB", "BB"]
+# Ordem de ação preflop por tamanho de mesa (8-max padrão, 9-max opcional
+# com --mesa 9). Pra cada posição de abertura, os seats modelados são ela
+# mesma + todo mundo entre ela e a BB (na ordem em que agem), + a BB.
+ACTION_ORDERS = {
+    8: ["UTG", "UTG+1", "MP", "HJ", "CO", "BTN", "SB", "BB"],
+    9: ["UTG", "UTG+1", "UTG+2", "MP", "HJ", "CO", "BTN", "SB", "BB"],
+}
+TABLE_SIZE = 8
+ACTION_ORDER = ACTION_ORDERS[TABLE_SIZE]
 
 
-def seats_for_opener(opener: str) -> list[str]:
-    i = ACTION_ORDER.index(opener)
-    bb_i = ACTION_ORDER.index("BB")
-    return ACTION_ORDER[i:bb_i + 1]  # [opener, ..., SB, BB]
+def seats_for_opener(opener: str, table_size: int = TABLE_SIZE) -> list[str]:
+    order = ACTION_ORDERS[table_size]
+    return order[order.index(opener):order.index("BB") + 1]  # [opener, ..., SB, BB]
+
+
+def positions_for(table_size: int = TABLE_SIZE) -> list[str]:
+    """Aberturas que faltam (tudo antes do BTN), da mais rápida (menos
+    seats) pra mais lenta."""
+    order = ACTION_ORDERS[table_size]
+    return list(reversed(order[:order.index("BTN")]))
 
 
 ANTE_BB = 0.125
-TABLE_SIZE = 8
-ANTE_POOL = ANTE_BB * TABLE_SIZE  # morto desde t=0, vai pro vencedor de qualquer terminal real
+# Stacks (antes do ante) dos jogadores que já foldaram antes do abridor --
+# não são modelados, só completam a mesa de ICM. Usa os primeiros que
+# forem necessários pra mesa ficar com 8 (ou 9) jogadores.
+OTHER_STACKS = [40.0, 25.0, 18.0, 12.0, 30.0, 20.0]
 
 
-def build_matchup_config(opener: str, stack: float) -> dict:
-    seats = seats_for_opener(opener)
+def build_matchup_config(opener: str, stack: float, table_size: int = TABLE_SIZE) -> dict:
+    """Correção (2026-09-24, pedido do usuário): a mesa de ICM tem SEMPRE
+    `table_size` jogadores (8 ou 9) -- antes era 6 pra CO/HJ/MP e 7/8 pra
+    UTG+1/UTG (contextos de ICM diferentes entre posições), enquanto o ante
+    era cobrado de 8. E o ante agora SAI das pilhas: cada jogador (inclusive
+    quem já foldou) paga ANTE_BB antes da mão, e o pote de antes vai pro
+    vencedor -- antes o pote de antes aparecia do nada (a soma de fichas da
+    mesa crescia ~1bb por mão jogada, distorcendo o ICM). `stack` é a pilha
+    ANTES do ante; o all-in efetivo é stack - ANTE_BB."""
+    seats = seats_for_opener(opener, table_size)
     n = len(seats)
     # posts: 0 pra quem nao tem blind, 0.5 pro SB, 1.0 pra BB -- sempre
     # os dois ultimos seats da sequencia (SB, BB), o resto e 0.
     seat_posts = [0.0] * (n - 2) + [0.5, 1.0]
-    # "outros jogadores" que ja foldaram antes do abridor (nao
-    # modelados, so contam pro contexto de ICM da mesa) -- mesma
-    # convencao ja usada nos jobs de 2 jogadores (other_stacks): mesa de
-    # ICM com 6 jogadores enquanto os seats modelados cabem (CO/HJ/MP);
-    # UTG+1 e UTG modelam 7 e 8 seats, entao a mesa de ICM fica com 7/8.
-    other_stacks = [40.0, 25.0, 18.0, 12.0][: max(0, 6 - n)]
+    others = OTHER_STACKS[: table_size - n]
     return {
         "seat_names": seats,
         "seat_idx_in_table": list(range(n)),
         "seat_posts": seat_posts,
-        "table_stacks": [stack] * n + other_stacks,
+        "table_stacks": [stack - ANTE_BB] * n + [s - ANTE_BB for s in others],
         "payouts": [500.0, 300.0, 200.0],
         "open_size": 2.2,
-        "effective_stack": stack,
-        "ante_pool": ANTE_POOL,
+        "effective_stack": stack - ANTE_BB,
+        "ante_pool": ANTE_BB * table_size,  # morto desde t=0, vai pro vencedor de qualquer terminal real
     }
 
 
@@ -135,13 +152,13 @@ CHECKPOINT_MINUTES = 10
 
 ENGINE_VERSION_MULTIWAY = "pokersync-solver-v0.2.0-multiway-ante"
 
-# Fila do mais rápido (menos seats) pro mais lento.
-POSITIONS_QUEUE = ["CO", "HJ", "MP", "UTG+1", "UTG"]
+# Fila do mais rápido (menos seats) pro mais lento (8-max; 9-max inclui UTG+2).
+POSITIONS_QUEUE = positions_for(TABLE_SIZE)
 STACKS = [15.0, 25.0, 40.0, 60.0]
 
 
-def label_for(opener: str, stack: float) -> str:
-    return f"{opener.replace('+', 'p')}_vs_BB_{int(stack)}bb_ante{ANTE_BB}"
+def label_for(opener: str, stack: float, table_size: int = TABLE_SIZE) -> str:
+    return f"{opener.replace('+', 'p')}_vs_BB_{int(stack)}bb_ante{ANTE_BB}_{table_size}max"
 
 
 def make_solver_factory(config: dict):
@@ -175,17 +192,27 @@ def build_drill_row(label: str, config: dict, strat: dict, exploitability: float
     gto_nodes = {
         seat_names[i]: {
             "phase1": {c: round(strat["phase1"][i][c], 4) for c in strat["phase1"][i]},
+            # {jammer: {quem ja pagou: {classe: prob de pagar}}} -- "ninguem"
+            # quando ninguem pagou antes; senao nomes separados por "+"
+            # (ex: "SB+BB"). v4: a decisao depende de quem ja pagou
+            # (overcall), ver engine/multiway_rfi.py.
             "phase2_vs_jam": {
-                seat_names[j]: {c: round(strat["phase2"][i][j][c], 4) for c in strat["phase2"][i][j]}
+                seat_names[j]: {
+                    ("+".join(seat_names[x] for x in callers) or "ninguem"):
+                        {c: round(p, 4) for c, p in by_class.items()}
+                    for callers, by_class in strat["phase2"][i][j].items()
+                }
                 for j in strat["phase2"][i]
             },
         }
         for i in range(len(seat_names))
     }
     opener = seat_names[0]
-    stack_bb = int(config["effective_stack"])
+    # stack de referência = pilha ANTES do ante (effective_stack já vem sem ele)
+    stack_bb = int(round(config["effective_stack"] + ANTE_BB))
+    table_size = len(config["table_stacks"])
     return {
-        "spot_id": f"rfi_multiway_{opener.lower()}_vs_bb_{stack_bb}bb_ante{ANTE_BB}",
+        "spot_id": f"rfi_multiway_{opener.lower()}_vs_bb_{stack_bb}bb_ante{ANTE_BB}_{table_size}max",
         "board": [],
         "pot": pot,
         "effective_stack": config["effective_stack"],
@@ -203,11 +230,11 @@ def build_drill_row(label: str, config: dict, strat: dict, exploitability: float
     }
 
 
-def upload_results(out_dir: Path, positions, stacks, dry_run: bool):
+def upload_results(out_dir: Path, positions, stacks, dry_run: bool, table_size: int = TABLE_SIZE):
     rows = []
     for opener in positions:
         for stack in stacks:
-            label = label_for(opener, stack)
+            label = label_for(opener, stack, table_size)
             result_path = out_dir / f"resultado_{label}.pkl"
             if not result_path.exists():
                 print(f"[{label}] resultado ainda não existe -- pulando (rode o treino primeiro).")
@@ -261,34 +288,40 @@ def main():
     parser = argparse.ArgumentParser(description="Treino offline do RFI multiway (todas as posições vs BB).")
     parser.add_argument("--upload", action="store_true", help="sobe os resultados prontos pro Supabase")
     parser.add_argument("--dry-run", action="store_true", help="com --upload: só mostra, não envia")
-    parser.add_argument("--posicoes", type=lambda t: _parse_list(t, str), default=POSITIONS_QUEUE)
+    parser.add_argument("--mesa", type=int, choices=sorted(ACTION_ORDERS), default=TABLE_SIZE,
+                        help="jogadores na mesa (8 = padrão, 9 inclui UTG+2)")
+    parser.add_argument("--posicoes", type=lambda t: _parse_list(t, str), default=None)
     parser.add_argument("--stacks", type=lambda t: _parse_list(t, float), default=STACKS)
     parser.add_argument("--iteracoes", type=int, default=TOTAL_ITERATIONS)
     parser.add_argument("--pasta", type=Path, default=BASE_DIR)
     args = parser.parse_args()
 
-    for p in args.posicoes:
-        if p not in POSITIONS_QUEUE:
-            sys.exit(f"ERRO: posição desconhecida {p!r} -- use uma de {', '.join(POSITIONS_QUEUE)}")
+    queue = positions_for(args.mesa)
+    positions = args.posicoes or queue
+    for p in positions:
+        if p not in queue:
+            sys.exit(f"ERRO: posição desconhecida {p!r} pra mesa de {args.mesa} -- use uma de {', '.join(queue)}")
     if args.iteracoes <= 0:
         sys.exit("ERRO: --iteracoes precisa ser positivo")
+    if any(s_ <= ANTE_BB + 1.0 for s_ in args.stacks):
+        sys.exit("ERRO: stacks precisam ser maiores que o blind + ante")
     out_dir = args.pasta.resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
 
     if args.upload:
-        upload_results(out_dir, args.posicoes, args.stacks, args.dry_run)
+        upload_results(out_dir, positions, args.stacks, args.dry_run, args.mesa)
         return
 
-    jobs = [(opener, stack) for opener in args.posicoes for stack in args.stacks]
-    print(f"Motor {ENGINE_VERSION}. Fila: {len(jobs)} combinação(ões) (posição x stack), "
-          f"{args.iteracoes:,} iterações cada. Arquivos em: {out_dir}\n"
+    jobs = [(opener, stack) for opener in positions for stack in args.stacks]
+    print(f"Motor {ENGINE_VERSION}. Mesa de {args.mesa} jogadores. Fila: {len(jobs)} combinação(ões) "
+          f"(posição x stack), {args.iteracoes:,} iterações cada. Arquivos em: {out_dir}\n"
           f"Pode parar (Ctrl+C) e retomar a qualquer momento.\n", flush=True)
 
     with GracefulStop() as stop:
         for opener, stack in jobs:
-            config = build_matchup_config(opener, stack)
+            config = build_matchup_config(opener, stack, args.mesa)
             status = train_and_evaluate(
-                label_for(opener, stack), config, args.iteracoes, out_dir,
+                label_for(opener, stack, args.mesa), config, args.iteracoes, out_dir,
                 make_solver_factory(config), ENGINE_VERSION, stop,
                 checkpoint_minutes=CHECKPOINT_MINUTES,
             )

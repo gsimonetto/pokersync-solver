@@ -48,9 +48,28 @@ def test_range_de_push_encolhe_com_stack_maior():
     )
 
 
+def test_remocao_de_cartas_bloqueador():
+    # SB empurra so' AA e KK. BB com A2o bloqueia os ases: com remocao de
+    # cartas o SB tem KK mais vezes que AA (6 combos de KK vs 3 de AA),
+    # entao pagar com A2o vale MAIS do que sem remocao (onde AA e KK
+    # aparecem na proporcao 6:6). Com K2o e' o contrario.
+    strat = {"sb_push": {c: 1.0 if c in ("AA", "KK") else 0.0 for c in _CLASSES},
+             "bb_call": {c: 1.0 for c in _CLASSES}}
+    evs = {}
+    for cr in (True, False):
+        solver = PushFoldSolver(stack_bb=15, equity_matrix=_EQUITY_MATRIX, classes=_CLASSES, card_removal=cr)
+        for m in (solver.opp_given_sb, solver.opp_given_bb.T):
+            assert abs(m.sum(axis=1) - 1).max() < 1e-9, "P(oponente | minha mao) tem que somar 1"
+        evs[cr] = solver.final_evs(strat)["bb_ev_call"]
+    assert evs[True]["A2o"] > evs[False]["A2o"], (evs[True]["A2o"], evs[False]["A2o"])
+    assert evs[True]["K2o"] < evs[False]["K2o"], (evs[True]["K2o"], evs[False]["K2o"])
+
+
 if __name__ == "__main__":
     test_push_range_faz_sentido_por_stack()
     print("  OK -- push range faz sentido por stack (AA/AKo sempre, 72o menos que AA)")
     test_range_de_push_encolhe_com_stack_maior()
     print("  OK -- range de push encolhe com stack maior")
+    test_remocao_de_cartas_bloqueador()
+    print("  OK -- remocao de cartas: A2o bloqueia AA (pagar vale mais), K2o bloqueia KK")
     print("Todos os testes de pushfold passaram.")

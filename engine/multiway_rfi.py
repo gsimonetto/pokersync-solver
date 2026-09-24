@@ -21,13 +21,14 @@ validado -- é o teste de consistência usado antes de confiar nele
 pra 3+ jogadores.
 """
 
+import itertools
 import random
 import sys
 from contextlib import contextmanager
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from engine.fast_eval import RANK_BIT, RANK_CHARS, RANK_KEY, SUIT_KEY, tables  # noqa: E402
+from engine.fast_eval import RANK_BIT, RANK_KEY, SUIT_KEY, tables  # noqa: E402
 from engine.hand_classes import all_hand_classes, combo_count  # noqa: E402
 from engine.icm import icm_equity  # noqa: E402
 from engine.multiway_equity import class_combo_indices, multiway_equity_counts  # noqa: E402
@@ -40,26 +41,12 @@ from engine.multiway_equity import class_combo_indices, multiway_equity_counts  
 #       cartas dadas de verdade (sem mãos impossíveis, e as cartas de
 #       quem foldou saem do baralho -- ver _BoardOracle), showdown chipEV
 #       mantendo a perda de quem foldou com blind.
-ENGINE_VERSION = "multiway-rfi-v3-2026-09-24"
+#   v4 (2026-09-24): fase 2 separada por quem ja pagou o jam (overcall).
+ENGINE_VERSION = "multiway-rfi-v4-2026-09-24"
 
 
-def _build_class_of_cards():
-    """_CLASS_OF[c1][c2] -> classe ('AKs', 'AKo', 'AA') de duas cartas
-    reais (índices 0..51, mesma convenção de engine/fast_eval.py)."""
-    table = [[None] * 52 for _ in range(52)]
-    for c1 in range(52):
-        for c2 in range(52):
-            if c1 == c2:
-                continue
-            hi, lo = max(c1 >> 2, c2 >> 2), min(c1 >> 2, c2 >> 2)
-            name = RANK_CHARS[hi] + RANK_CHARS[lo]
-            if hi != lo:
-                name += "s" if (c1 & 3) == (c2 & 3) else "o"
-            table[c1][c2] = name
-    return table
+from engine.card_removal import CLASS_OF as _CLASS_OF  # noqa: E402  (tabela carta+carta -> classe)
 
-
-_CLASS_OF = _build_class_of_cards()
 
 
 class _Table(dict):
@@ -276,9 +263,20 @@ class MultiwayRfiSolver:
         # media que nao e otima pra nenhuma das duas -- e o motivo do CO
         # (que sempre responde, seja qual for o jammer) ficar com
         # exploitability muito maior que os outros seats.
+        # v4 (2026-09-24, overcall): alem do jammer, a ficha de fase 2 tambem
+        # depende de QUEM JA PAGOU o jam antes deste seat (informacao
+        # publica). Pagar um jam sozinho e pagar depois de alguem ja ter
+        # pago (overcall, pote de 3+ jogadores) sao decisoes diferentes --
+        # a segunda precisa de mao mais forte. Antes as duas situacoes
+        # dividiam a mesma ficha e o seat aprendia uma media errada pras
+        # duas. Chave: phase2[seat][jammer][callers][classe], com callers =
+        # tupla ordenada dos seats que pagaram antes (() = ninguem pagou).
         self.phase1 = [{c: InfoSet(2) for c in classes} for _ in range(self.n_seats)]
         self.phase2 = [
-            {j: {c: InfoSet(2) for c in classes} for j in self._possible_jammers(seat_i)}
+            {
+                j: {callers: {c: InfoSet(2) for c in classes} for callers in self._possible_callers(seat_i, j)}
+                for j in self._possible_jammers(seat_i)
+            }
             for seat_i in range(self.n_seats)
         ]
 
@@ -302,6 +300,22 @@ class MultiwayRfiSolver:
         if seat_i == 0:
             return list(range(1, self.n_seats))
         return list(range(1, seat_i))
+
+    def _responders(self, jammer):
+        """Ordem de resposta ao jam de `jammer`: quem vem depois dele, e o
+        abridor por ultimo (ja tinha aberto)."""
+        return [i for i in range(self.n_seats) if i > jammer] + [0]
+
+    def _possible_callers(self, seat_i, jammer):
+        """Todos os grupos possiveis de quem pagou o jam ANTES de `seat_i`
+        (subconjuntos de quem responde antes dele), como tuplas ordenadas."""
+        responders = self._responders(jammer)
+        before = responders[:responders.index(seat_i)]
+        return [tuple(sorted(c)) for k in range(len(before) + 1) for c in itertools.combinations(before, k)]
+
+    @staticmethod
+    def _callers_key(live_set, jammer):
+        return tuple(sorted(s for s in live_set if s != jammer))
 
     def _icm(self, stack_deltas: dict):
         """stack_deltas: {seat_idx: delta}. Retorna a UTILIDADE de cada
@@ -353,6 +367,10 @@ class MultiwayRfiSolver:
     # sorteio de maos). Pares (~14 mil combinacoes) e trincas (~820 mil)
     # continuam no cache, com memoria limitada.
     EQUITY_CACHE_MAX_PLAYERS = 3
+    # False = mesmo com cartas de verdade, a equity sai por classe
+    # (_multiway_eq) -- so' pra teste cruzado com o motor heads-up exato,
+    # que usa a matriz de equity por classe.
+    USE_BOARD_ORACLE = True
 
     def _multiway_eq(self, seat_hand_pairs):
         """seat_hand_pairs: lista de (seat_idx, hand_class). Retorna dict
@@ -649,7 +667,7 @@ class MultiwayRfiSolver:
             return self._showdown(live_set, hands)
 
         seat_i = responders[idx]
-        infoset = self.phase2[seat_i][jammer][hands[seat_i]]
+        infoset = self.phase2[seat_i][jammer][self._callers_key(live_set, jammer)][hands[seat_i]]
         strat = infoset.current_strategy()
         opp_reach = self._opp_reach(own_reach, seat_i)
         # peso da propria strategy_sum (ver comentario abaixo) -- pra
@@ -719,7 +737,7 @@ class MultiwayRfiSolver:
         # mesa, criado no primeiro showdown dela (ver _BoardOracle). Sem
         # cartas (modo de comparação com o motor heads-up): equity por
         # classe, como antes (_multiway_eq).
-        holes = getattr(hands, "holes", None)
+        holes = getattr(hands, "holes", None) if self.USE_BOARD_ORACLE else None
         if holes is not None:
             oracle = hands.oracle
             if oracle is None:
@@ -777,7 +795,8 @@ class MultiwayRfiSolver:
             "engine_version": ENGINE_VERSION,
             "phase1": [{c: pack(inf) for c, inf in seat.items()} for seat in self.phase1],
             "phase2": [
-                {j: {c: pack(inf) for c, inf in by_class.items()} for j, by_class in seat.items()}
+                {j: {callers: {c: pack(inf) for c, inf in by_class.items()} for callers, by_class in by_callers.items()}
+                 for j, by_callers in seat.items()}
                 for seat in self.phase2
             ],
             "equity_cache": dict(self._equity_cache),
@@ -801,9 +820,10 @@ class MultiwayRfiSolver:
             for c, packed in seat.items():
                 unpack(self.phase1[seat_i][c], packed)
         for seat_i, seat in enumerate(state["phase2"]):
-            for j, by_class in seat.items():
-                for c, packed in by_class.items():
-                    unpack(self.phase2[seat_i][j][c], packed)
+            for j, by_callers in seat.items():
+                for callers, by_class in by_callers.items():
+                    for c, packed in by_class.items():
+                        unpack(self.phase2[seat_i][j][callers][c], packed)
         self._equity_cache = dict(state.get("equity_cache", {}))
 
     def average_strategy(self):
@@ -812,14 +832,16 @@ class MultiwayRfiSolver:
                 {c: self.phase1[i][c].average_strategy()[1] for c in self.classes}
                 for i in range(self.n_seats)
             ],
-            # phase2 agora tem uma camada extra: pra cada seat, uma
-            # estrategia de fold/call DIFERENTE por jammer (ver comentario
-            # em __init__ sobre por que "quem deu o jam" precisa ser parte
-            # da ficha de decisao).
+            # phase2[seat][jammer][callers][classe] = prob de PAGAR -- uma
+            # estrategia por jammer E por grupo de quem ja pagou antes (ver
+            # __init__: quem deu o jam e quem ja pagou sao informacao publica).
             "phase2": [
                 {
-                    j: {c: self.phase2[i][j][c].average_strategy()[1] for c in self.classes}
-                    for j in self.phase2[i]
+                    j: {
+                        callers: {c: by_class[c].average_strategy()[1] for c in self.classes}
+                        for callers, by_class in by_callers.items()
+                    }
+                    for j, by_callers in self.phase2[i].items()
                 }
                 for i in range(self.n_seats)
             ],
@@ -896,11 +918,14 @@ class MultiwayRfiSolver:
         responders.append(0)
         return self._eval_resolve_responders(jammer, responders, 0, {jammer}, hands, avg)
 
+    def _p_call(self, avg, seat_i, jammer, live_set, hands):
+        return avg["phase2"][seat_i][jammer][self._callers_key(live_set, jammer)][hands[seat_i]]
+
     def _eval_resolve_responders(self, jammer, responders, idx, live_set, hands, avg):
         if idx >= len(responders):
             return self._showdown(live_set, hands)
         seat_i = responders[idx]
-        p_call = avg["phase2"][seat_i][jammer][hands[seat_i]]
+        p_call = self._p_call(avg, seat_i, jammer, live_set, hands)
         return self._mix(
             p_call,
             lambda: self._eval_resolve_responders(jammer, responders, idx + 1, live_set, hands, avg),
@@ -910,20 +935,29 @@ class MultiwayRfiSolver:
     def _eval_resolve_responders_forced(self, jammer, responders, idx, live_set, hands, avg,
                                          forced_seat, forced_action):
         """Como _eval_resolve_responders, mas a decisão de `forced_seat`
-        (quando aparece como responder) é FORÇADA pra `forced_action`
-        (0=fold, 1=call) em vez de usar avg_strategy -- usado tanto pra
-        FIXAR a política de forced_seat (chamado com forced_action=0 e
-        =1 pra comparar) quanto na avaliação final (chamado com a ação
-        já fixada, olhando só a própria mão de forced_seat)."""
+        (quando aparece como responder) é FORÇADA em vez de usar
+        avg_strategy -- usado tanto pra FIXAR a política de forced_seat
+        (chamado com forced_action=0 e =1 pra comparar) quanto na avaliação
+        final (com a política já fixada, olhando só a própria mão de
+        forced_seat).
+
+        forced_action: 0 (fold), 1 (call), ou um dict {callers: 0/1/None}
+        -- a ação pode depender de QUEM JÁ PAGOU antes (ver __init__); None
+        (ou grupo ausente do dict) = usa a frequência treinada naquele
+        ponto (política não fixada por falta de amostra, grupo raríssimo)."""
         if idx >= len(responders):
             return self._showdown(live_set, hands)
         seat_i = responders[idx]
         if seat_i == forced_seat:
-            next_live = live_set | {seat_i} if forced_action == 1 else live_set
-            return self._eval_resolve_responders_forced(
-                jammer, responders, idx + 1, next_live, hands, avg, forced_seat, forced_action
-            )
-        p_call = avg["phase2"][seat_i][jammer][hands[seat_i]]
+            action = forced_action
+            if isinstance(forced_action, dict):
+                action = forced_action.get(self._callers_key(live_set, jammer))
+            if action is not None:
+                next_live = live_set | {seat_i} if action == 1 else live_set
+                return self._eval_resolve_responders_forced(
+                    jammer, responders, idx + 1, next_live, hands, avg, forced_seat, forced_action
+                )
+        p_call = self._p_call(avg, seat_i, jammer, live_set, hands)
         return self._mix(
             p_call,
             lambda: self._eval_resolve_responders_forced(
@@ -958,7 +992,7 @@ class MultiwayRfiSolver:
         classes = {i: (fixed_hand if i == fixed_seat else _CLASS_OF[a][b]) for i, (a, b) in enumerate(holes)}
         return _Table(classes, holes)
 
-    def _history_weight(self, hands, avg, seat, jammer=None):
+    def _history_weight(self, hands, avg, seat, jammer=None, callers=None):
         """Chance (dadas as maos) de a acao publica ter chegado ate a
         decisao de `seat` do jeito que chegou -- abridor ABRIU (se `seat`
         nao for o proprio abridor), todo mundo entre o abridor e o jammer
@@ -973,9 +1007,23 @@ class MultiwayRfiSolver:
             w *= 1.0 - avg["phase1"][k][hands[k]]
         if jammer is not None:
             w *= avg["phase1"][jammer][hands[jammer]]
+            if callers is not None and w > 0.0:
+                # quem respondeu ANTES de `seat`: pagou (se esta em callers)
+                # ou foldou -- tambem e' historico publico (v4, overcall)
+                live = {jammer}
+                for r in self._responders(jammer):
+                    if r == seat:
+                        break
+                    p = self._p_call(avg, r, jammer, live, hands)
+                    if r in callers:
+                        w *= p
+                        live.add(r)
+                    else:
+                        w *= 1.0 - p
         return w
 
-    def _sample_posterior(self, seat, hand, avg, rng, samples, jammer=None, max_draws_per_sample=400):
+    def _sample_posterior(self, seat, hand, avg, rng, samples, jammer=None, max_draws_per_sample=400,
+                          callers=None):
         """Sorteia `samples` mesas (maos dos OUTROS seats) CONDICIONADAS ao
         historico publico que leva ate a decisao de `seat` com `hand`
         (rejeicao: aceita cada sorteio com probabilidade _history_weight).
@@ -994,7 +1042,7 @@ class MultiwayRfiSolver:
         while len(accepted) < samples and budget > 0:
             budget -= 1
             hands = self._sample_other_hands(seat, hand, rng)
-            w = self._history_weight(hands, avg, seat, jammer)
+            w = self._history_weight(hands, avg, seat, jammer, callers)
             if w >= 1.0 or (w > 0.0 and rng.random() < w):
                 accepted.append(hands)
         return accepted
@@ -1006,14 +1054,54 @@ class MultiwayRfiSolver:
         val_jam = self._eval_phase2(seat, hands, avg).get(seat, 0.0)
         return val_fold, val_jam
 
-    def _phase2_values(self, seat, jammer, hands, avg):
+    def _phase2_values(self, seat, jammer, hands, avg, callers=()):
         """(valor de foldar, valor de pagar) pra `seat` respondendo ao jam
-        de `jammer`, numa mesa especifica."""
-        responders = [i for i in range(self.n_seats) if i > jammer]
-        responders.append(0)
-        icm_fold = self._eval_resolve_responders_forced(jammer, responders, 0, {jammer}, hands, avg, seat, 0)
-        icm_call = self._eval_resolve_responders_forced(jammer, responders, 0, {jammer}, hands, avg, seat, 1)
+        de `jammer` depois de `callers` terem pagado (e o resto de quem
+        agiu antes ter foldado), numa mesa especifica."""
+        responders = self._responders(jammer)
+        idx = responders.index(seat)
+        live = {jammer, *callers}
+        icm_fold = self._eval_resolve_responders_forced(jammer, responders, idx, live, hands, avg, seat, 0)
+        icm_call = self._eval_resolve_responders_forced(jammer, responders, idx, live, hands, avg, seat, 1)
         return icm_fold.get(seat, 0.0), icm_call.get(seat, 0.0)
+
+    # Grupo de "quem ja pagou" alcancado menos que isso por mao jogada nao
+    # e' avaliado no best-response/checagem (v4): com 8 seats existem
+    # dezenas de grupos por jammer, e os raros (ex: 4 jogadores ja pagaram)
+    # quase nunca acontecem -- o sorteio condicionado nao acha mesas
+    # suficientes e so' gastaria tempo. No best-response esses pontos usam
+    # a frequencia treinada; na checagem entram no resumo como "raros".
+    MIN_NODE_FREQ = 1e-4
+
+    def _phase2_node_freq(self, avg, rng, deals=20_000):
+        """Frequencia estimada (por mao jogada) de cada ponto de decisao de
+        fase 2: {(seat, jammer, callers): prob}. Monte Carlo barato: da as
+        cartas, pesa o caminho ate o jam de cada jammer possivel pela
+        estrategia media e sorteia as respostas dos responders."""
+        freq = {}
+        n = self.n_seats
+        for _ in range(deals):
+            hands = self._deal_hands(rng)
+            reach = avg["phase1"][0][hands[0]]
+            for j in range(1, n):
+                if reach <= 0.0:
+                    break
+                p_jam = avg["phase1"][j][hands[j]]
+                w = reach * p_jam
+                reach *= 1.0 - p_jam
+                if w <= 0.0:
+                    continue
+                live = {j}
+                for r in self._responders(j):
+                    key = (r, j, self._callers_key(live, j))
+                    freq[key] = freq.get(key, 0.0) + w
+                    if rng.random() < self._p_call(avg, r, j, live, hands):
+                        live.add(r)
+        return {k: v / deals for k, v in freq.items()}
+
+    def _frequent_callers(self, seat, jammer, node_freq):
+        return [c for c in self._possible_callers(seat, jammer)
+                if node_freq.get((seat, jammer, c), 0.0) >= self.MIN_NODE_FREQ]
 
     def _fix_policy_phase1(self, br_seat, avg, samples, rng):
         """Fixa fold-vs-jam de `br_seat` (br_seat >= 1) pra cada classe de
@@ -1032,23 +1120,39 @@ class MultiwayRfiSolver:
             policy[h] = 1 if val_jam > val_fold else 0
         return policy
 
-    def _fix_policy_phase2(self, br_seat, jammer, avg, samples, rng):
+    def _fix_policy_phase2(self, br_seat, jammer, avg, samples, rng, node_freq):
         """Fixa fold-vs-call de `br_seat` respondendo ao jam de `jammer`
-        (br_seat == 0, ou br_seat > jammer), por classe de mão. As mãos dos
+        (br_seat == 0, ou br_seat > jammer), por GRUPO de quem ja pagou e
+        por classe de mão: {callers: {classe: 0/1/None}}. As mãos dos
         adversários vêm condicionadas ao histórico inteiro (abridor abriu,
-        quem estava antes do jammer foldou, jammer JAMMOU) -- igual
-        rfi_jam.py faz por enumeração exata, aqui por amostragem com
-        rejeição (ver _sample_posterior), já que enumerar todas as mãos dos
-        adversários explode com muitos seats."""
+        quem estava antes do jammer foldou, jammer JAMMOU, quem respondeu
+        antes pagou/foldou) -- igual rfi_jam.py faz por enumeração exata,
+        aqui por amostragem com rejeição (ver _sample_posterior). None =
+        amostra insuficiente (mão que quase nunca chega ali): a avaliação
+        usa a frequência treinada nesse ponto. Grupos raros (abaixo de
+        MIN_NODE_FREQ) ficam de fora pelo mesmo motivo."""
         policy = {}
-        for h in self.classes:
-            val_fold, val_call = 0.0, 0.0
-            for hands in self._sample_posterior(br_seat, h, avg, rng, samples, jammer=jammer):
-                vf, vc = self._phase2_values(br_seat, jammer, hands, avg)
-                val_fold += vf
-                val_call += vc
-            policy[h] = 1 if val_call > val_fold else 0
+        for callers in self._frequent_callers(br_seat, jammer, node_freq):
+            by_hand = {}
+            for h in self.classes:
+                tables = self._sample_posterior(br_seat, h, avg, rng, samples, jammer=jammer, callers=callers)
+                if len(tables) < max(2, samples // 4):
+                    by_hand[h] = None
+                    continue
+                val_fold, val_call = 0.0, 0.0
+                for hands in tables:
+                    vf, vc = self._phase2_values(br_seat, jammer, hands, avg, callers)
+                    val_fold += vf
+                    val_call += vc
+                by_hand[h] = 1 if val_call > val_fold else 0
+            policy[callers] = by_hand
         return policy
+
+    @staticmethod
+    def _policy_for_hand(policy_by_callers, hand):
+        """{callers: {classe: acao}} -> {callers: acao} pra uma mão (o
+        formato que _eval_resolve_responders_forced aceita)."""
+        return {callers: by_hand.get(hand) for callers, by_hand in policy_by_callers.items()}
 
     def _fix_policy_root_seat0(self, avg, phase2_policy, samples, rng):
         """Fixa abrir-vs-foldar do abridor (seat 0) na raiz, USANDO a
@@ -1074,7 +1178,7 @@ class MultiwayRfiSolver:
         p_jam = avg["phase1"][seat_i][hands[seat_i]]
         responders = [i for i in range(self.n_seats) if i > seat_i]
         responders.append(0)
-        action0 = phase2_policy[seat_i][hands[0]]
+        action0 = self._policy_for_hand(phase2_policy[seat_i], hands[0])
         return self._mix(
             p_jam,
             lambda: self._eval_fold_or_jam_seat0_fixed(seat_i + 1, hands, avg, phase2_policy),
@@ -1082,16 +1186,17 @@ class MultiwayRfiSolver:
         )
 
     def _fix_br_policy(self, br_seat, avg, samples, rng):
+        node_freq = self._phase2_node_freq(avg, rng)
         if br_seat == 0:
             phase2_policy = {
-                jammer: self._fix_policy_phase2(0, jammer, avg, samples, rng)
+                jammer: self._fix_policy_phase2(0, jammer, avg, samples, rng, node_freq)
                 for jammer in range(1, self.n_seats)
             }
             root_policy = self._fix_policy_root_seat0(avg, phase2_policy, samples, rng)
             return {"root": root_policy, "phase2": phase2_policy}
         phase1_policy = self._fix_policy_phase1(br_seat, avg, samples, rng)
         phase2_policy = {
-            jammer: self._fix_policy_phase2(br_seat, jammer, avg, samples, rng)
+            jammer: self._fix_policy_phase2(br_seat, jammer, avg, samples, rng, node_freq)
             for jammer in range(1, br_seat)
         }
         return {"phase1": phase1_policy, "phase2": phase2_policy}
@@ -1126,7 +1231,7 @@ class MultiwayRfiSolver:
         responders = [i for i in range(self.n_seats) if i > jammer]
         responders.append(0)
         if br_seat in responders and (br_seat == 0 or br_seat > jammer):
-            action = policy["phase2"][jammer][hands[br_seat]]
+            action = self._policy_for_hand(policy["phase2"][jammer], hands[br_seat])
             return self._eval_resolve_responders_forced(jammer, responders, 0, {jammer}, hands, avg, br_seat, action)
         return self._eval_resolve_responders(jammer, responders, 0, {jammer}, hands, avg)
 
@@ -1260,9 +1365,10 @@ class MultiwayRfiSolver:
             # possivel, sem vazamento -- feito UMA VEZ so', reaproveitado
             # pra todas as maos de sample_hands.
             phase2_policy = {}
+            node_freq = self._phase2_node_freq(avg_strategy, rng)
             for jammer in range(1, self.n_seats):
                 phase2_policy[jammer] = self._fix_policy_phase2(
-                    0, jammer, avg_strategy, phase2_fix_samples, rng
+                    0, jammer, avg_strategy, phase2_fix_samples, rng, node_freq
                 )
 
             original_equity_batch = self.EQUITY_BATCH
@@ -1398,7 +1504,8 @@ class MultiwayRfiSolver:
 
     def check_phase2_convergence(self, seat_i, jammer, avg_strategy=None, sample_hands=None,
                                   iterations=40, gap_threshold=0.3, seed=99,
-                                  equity_precision_batch=600, z=3.0, max_iterations_factor=8):
+                                  equity_precision_batch=600, z=3.0, max_iterations_factor=8,
+                                  callers=()):
         """Checa a decisao de call-vs-fold de `seat_i` respondendo a um
         jam de `jammer` (seat_i deve ser 0, ou > jammer -- os unicos
         responders validos nessa ordem de acao, ver _eval_phase2).
@@ -1419,7 +1526,11 @@ class MultiwayRfiSolver:
         (que responde depois, em fase 2) sair de qualquer lugar do
         baralho. Mais a confirmacao estatistica (ver _confirm_gap).
 
-        Retorna lista de dicts {seat, jammer, hand, gap, trained_freq, se, n}."""
+        v4 (overcall): checa UM grupo de quem ja pagou antes (`callers`,
+        tupla de seats; () = ninguem pagou) -- cada grupo e' uma ficha
+        propria no treino.
+
+        Retorna lista de dicts {seat, jammer, callers, hand, gap, trained_freq, se, n}."""
         if not (seat_i == 0 or seat_i > jammer):
             raise ValueError(f"seat {seat_i} nunca responde ao jam de {jammer} nesta ordem de acao")
         if avg_strategy is None:
@@ -1436,18 +1547,20 @@ class MultiwayRfiSolver:
                 for hand in sample_hands:
                     def draw_gaps(k, hand=hand):
                         out = []
-                        for hands in self._sample_posterior(seat_i, hand, avg_strategy, rng, k, jammer=jammer):
-                            vf, vc = self._phase2_values(seat_i, jammer, hands, avg_strategy)
+                        for hands in self._sample_posterior(seat_i, hand, avg_strategy, rng, k, jammer=jammer,
+                                                            callers=callers):
+                            vf, vc = self._phase2_values(seat_i, jammer, hands, avg_strategy, callers)
                             out.append(vc - vf)
                         return out
-                    trained = avg_strategy["phase2"][seat_i][jammer][hand]
+                    trained = avg_strategy["phase2"][seat_i][jammer][callers][hand]
                     # sem mesa suficiente com esse historico (jam rarissimo
                     # com essa mao) -> None, contado como "sem dados" e nao
                     # apontado (nao da pra confundir com gap zero).
                     stats = self._confirm_gap(draw_gaps, iterations, max_iterations_factor, gap_threshold, trained, z)
                     self._tally_check(stats)
                     if stats is not None and stats["flag"]:
-                        flags.append({"seat": seat_i, "jammer": jammer, "hand": hand, "gap": stats["gap"],
+                        flags.append({"seat": seat_i, "jammer": jammer, "callers": callers, "hand": hand,
+                                      "gap": stats["gap"],
                                       "trained_freq": trained, "se": stats["se"], "n": stats["n"]})
         finally:
             self.EQUITY_BATCH = original_equity_batch
@@ -1505,15 +1618,31 @@ class MultiwayRfiSolver:
                     seat_i, avg_strategy, sample_hands, iterations, gap_threshold, seed, **common,
                 )
             )
+        # v4 (overcall): cada grupo de "quem ja pagou antes" e' uma decisao
+        # separada; so' os que acontecem com alguma frequencia sao checados
+        # (MIN_NODE_FREQ), os raros entram no resumo.
+        node_freq = self._phase2_node_freq(avg_strategy, random.Random(f"nodes-{seed}"))
+        rare = 0
+        rare_mass = 0.0
         for jammer in range(1, self.n_seats):
-            responders = [i for i in range(self.n_seats) if i > jammer] + [0]
-            for seat_i in responders:
-                say(f"seat {seat_i} ({self.seat_names[seat_i]}): call vs fold contra jam de "
-                    f"{self.seat_names[jammer]}")
-                flags["phase2"].extend(
-                    self.check_phase2_convergence(
-                        seat_i, jammer, avg_strategy, sample_hands, phase2_iterations, gap_threshold, seed,
-                        **common,
+            for seat_i in self._responders(jammer):
+                frequent = self._frequent_callers(seat_i, jammer, node_freq)
+                for callers in self._possible_callers(seat_i, jammer):
+                    if callers not in frequent:
+                        rare += 1
+                        rare_mass += node_freq.get((seat_i, jammer, callers), 0.0)
+                for callers in frequent:
+                    who = "+".join(self.seat_names[c] for c in callers) or "ninguem"
+                    say(f"seat {seat_i} ({self.seat_names[seat_i]}): call vs fold contra jam de "
+                        f"{self.seat_names[jammer]} (ja pagaram: {who})")
+                    flags["phase2"].extend(
+                        self.check_phase2_convergence(
+                            seat_i, jammer, avg_strategy, sample_hands, phase2_iterations, gap_threshold, seed,
+                            callers=callers, **common,
+                        )
                     )
-                )
+        if self.last_check_summary is None:
+            self.last_check_summary = {"checked": 0, "flagged": 0, "inconclusive": 0, "insufficient_data": 0}
+        self.last_check_summary["rare_nodes_skipped"] = rare
+        self.last_check_summary["rare_nodes_freq"] = rare_mass
         return flags

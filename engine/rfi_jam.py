@@ -59,6 +59,7 @@ from typing import Sequence
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from engine.hand_classes import all_hand_classes, combo_count  # noqa: E402
 from engine.icm import icm_equity  # noqa: E402
+from engine.card_removal import CLASS_OF, conditional_opponent_weights  # noqa: E402
 
 
 class InfoSet:
@@ -102,7 +103,7 @@ class RfiJamSolver:
     def __init__(self, sb_idx, bb_idx, table_stacks, payouts, equity_matrix, classes,
                  open_size=2.2, open_sizes: Sequence[float] | None = None,
                  effective_stack=None, opener_post=0.5, defender_post=1.0,
-                 dead_money=0.0, use_icm: bool = True):
+                 dead_money=0.0, use_icm: bool = True, card_removal: bool = True):
         self.sb_idx = sb_idx  # "opener" (nome mantido por compatibilidade)
         self.bb_idx = bb_idx  # "defender"
         self.table_stacks = list(table_stacks)
@@ -115,6 +116,16 @@ class RfiJamSolver:
         self.weights = {c: combo_count(c) for c in classes}
         total_w = sum(self.weights.values())
         self.weights_norm = {c: w / total_w for c, w in self.weights.items()}
+        # card_removal (2026-09-24): SB e BB recebem cartas do MESMO baralho
+        # -- a chance da classe do oponente depende da minha (quem tem AA
+        # deixa só 2 ases). opp_w[minha][dele] = P(dele | minha). False =
+        # classes independentes (modelo antigo, mantido pra comparação exata
+        # com o motor legado e com o multiway nos testes).
+        self.card_removal = card_removal
+        if card_removal:
+            self.opp_w = conditional_opponent_weights(classes)
+        else:
+            self.opp_w = {c: self.weights_norm for c in classes}
 
         # `open_sizes` (lista) tem prioridade; `open_size` (escalar,
         # compatibilidade com todo chamador existente) vira lista de 1.
@@ -251,8 +262,12 @@ class RfiJamSolver:
         classes_list = self.classes
         weights_list = [self.weights_norm[c] for c in classes_list]
         for _ in range(iterations):
-            sb_class = random.choices(classes_list, weights=weights_list, k=1)[0]
-            bb_class = random.choices(classes_list, weights=weights_list, k=1)[0]
+            if self.card_removal:
+                a1, a2, b1, b2 = random.sample(range(52), 4)
+                sb_class, bb_class = CLASS_OF[a1][a2], CLASS_OF[b1][b2]
+            else:
+                sb_class = random.choices(classes_list, weights=weights_list, k=1)[0]
+                bb_class = random.choices(classes_list, weights=weights_list, k=1)[0]
             self._node_root(sb_class, bb_class, 1.0, 1.0)
 
     def average_strategy(self):
@@ -306,13 +321,14 @@ class RfiJamSolver:
 
             # sb_facing_jam: condicionar na distribuicao da BB DADO que
             # ela escolheu dar jam contra ESSE tamanho.
-            total_jam_reach = sum(self.weights_norm[c] * bb_jam_prob[c] for c in self.classes)
             icm_fold_vs_jam = self.icm_sb_fold_vs_jam[size]
             for sb_class in self.classes:
+                opp = self.opp_w[sb_class]
+                total_jam_reach = sum(opp[c] * bb_jam_prob[c] for c in self.classes)
                 ev_fold = icm_fold_vs_jam[0]
                 ev_call = 0.0
                 for bb_class in self.classes:
-                    w = self.weights_norm[bb_class] * bb_jam_prob[bb_class]
+                    w = opp[bb_class] * bb_jam_prob[bb_class]
                     eq = self._equity(sb_class, bb_class)
                     ev_call += w * (eq * self.icm_showdown_sbwins[0] + (1 - eq) * self.icm_showdown_bbwins[0])
                 if total_jam_reach > 0:
@@ -321,12 +337,13 @@ class RfiJamSolver:
 
             # bb_facing_raise: condicionar na distribuicao do SB DADO que
             # ele escolheu abrir ESSE tamanho especificamente.
-            total_open_reach = sum(self.weights_norm[c] * sb_open_prob[c] for c in self.classes)
             for bb_class in self.classes:
+                opp = self.opp_w[bb_class]
+                total_open_reach = sum(opp[c] * sb_open_prob[c] for c in self.classes)
                 ev_fold = self.icm_bb_fold_vs_raise[1]
                 ev_jam = 0.0
                 for sb_class in self.classes:
-                    w = self.weights_norm[sb_class] * sb_open_prob[sb_class]
+                    w = opp[sb_class] * sb_open_prob[sb_class]
                     eq = self._equity(sb_class, bb_class)
                     call_p = sb_call_prob[sb_class]
                     ev_showdown = eq * self.icm_showdown_sbwins[1] + (1 - eq) * self.icm_showdown_bbwins[1]
@@ -342,7 +359,7 @@ class RfiJamSolver:
                 ev_fold = self.icm_fold_root[0]
                 ev_open = 0.0
                 for bb_class in self.classes:
-                    w = self.weights_norm[bb_class]
+                    w = self.opp_w[sb_class][bb_class]
                     jam_p = bb_jam_prob[bb_class]
                     ev_bb_fold = self.icm_bb_fold_vs_raise[0]
                     eq = self._equity(sb_class, bb_class)
@@ -401,15 +418,16 @@ class RfiJamSolver:
             ev_call_by_size = {}
             for size in self.sizes:
                 bb_jam_prob = bb_jam_by_size[size]
-                total_jam_reach = sum(self.weights_norm[c] * bb_jam_prob[c] for c in self.classes)
                 icm_fold_vs_jam = self.icm_sb_fold_vs_jam[size]
                 best_call = {}
                 ev_call_map = {}
                 for sb_class in self.classes:
+                    opp = self.opp_w[sb_class]
+                    total_jam_reach = sum(opp[c] * bb_jam_prob[c] for c in self.classes)
                     ev_fold = icm_fold_vs_jam[0]
                     ev_call = 0.0
                     for bb_class in self.classes:
-                        w = self.weights_norm[bb_class] * bb_jam_prob[bb_class]
+                        w = opp[bb_class] * bb_jam_prob[bb_class]
                         eq = self._equity(sb_class, bb_class)
                         ev_call += w * (eq * self.icm_showdown_sbwins[0] + (1 - eq) * self.icm_showdown_bbwins[0])
                     if total_jam_reach > 0:
@@ -435,7 +453,7 @@ class RfiJamSolver:
                     bb_jam_prob = bb_jam_by_size[size]
                     ev_open = 0.0
                     for bb_class in self.classes:
-                        w_bb = self.weights_norm[bb_class]
+                        w_bb = self.opp_w[sb_class][bb_class]
                         jam_p = bb_jam_prob[bb_class]
                         ev_bb_fold = self.icm_bb_fold_vs_raise[0]
                         ev_open += w_bb * (jam_p * ev_facing_jam + (1 - jam_p) * ev_bb_fold)
@@ -450,11 +468,12 @@ class RfiJamSolver:
             total = 0.0
             # Reach de "SB abre ALGUM tamanho" (pra ponderar o caso
             # "SB foldou na raiz", que independe de qual tamanho).
-            total_open_reach_any = sum(
-                self.weights_norm[c] * sum(sb_open_raw[c][s] for s in self.sizes) for c in self.classes
-            )
             for bb_class in self.classes:
                 w_bb = self.weights_norm[bb_class]
+                opp = self.opp_w[bb_class]
+                total_open_reach_any = sum(
+                    opp[c] * sum(sb_open_raw[c][s] for s in self.sizes) for c in self.classes
+                )
                 ev_fold_root_bb = self.icm_fold_root[1]
 
                 # Por tamanho: melhor resposta do BB (fold ou jam),
@@ -464,14 +483,14 @@ class RfiJamSolver:
                 for size in self.sizes:
                     sb_open_prob = {c: sb_open_raw[c][size] for c in self.classes}
                     sb_call_prob = sb_call_by_size[size]
-                    total_open_reach = sum(self.weights_norm[c] * sb_open_prob[c] for c in self.classes)
+                    total_open_reach = sum(opp[c] * sb_open_prob[c] for c in self.classes)
                     reach_by_size[size] = total_open_reach
 
                     ev_fold = self.icm_bb_fold_vs_raise[1]
                     icm_fold_vs_jam = self.icm_sb_fold_vs_jam[size]
                     ev_jam_numer = 0.0
                     for sb_class in self.classes:
-                        w_sb = self.weights_norm[sb_class]
+                        w_sb = opp[sb_class]
                         open_p = sb_open_prob[sb_class]
                         call_p = sb_call_prob[sb_class]
                         eq = self._equity(sb_class, bb_class)

@@ -29,6 +29,9 @@ jobs:
       - name: Equity pré-flop — contra números conhecidos
         run: python tests/equity.py
 
+      - name: Matriz de equity de produção (arquivo pronto usado pelos jobs)
+        run: python tests/equity_production.py
+
       - name: Pós-flop river (MDF exata + exploitability rigorosa)
         run: python tests/postflop_river.py
 

@@ -107,8 +107,8 @@ def test_lockstep_2_seats_reproduz_heads_up():
     for c in _CLASSES:
         max_diff_open = max(max_diff_open, abs(hu_strat["sb_open"][c] - mw_strat["phase1"][0][c]))
         max_diff_jam = max(max_diff_jam, abs(hu_strat["bb_jam"][c] - mw_strat["phase1"][1][c]))
-        if c in mw.phase2[0][1]:
-            max_diff_call = max(max_diff_call, abs(hu_strat["sb_call_jam"][c] - mw_strat["phase2"][0][1][c]))
+        if c in mw.phase2[0][1][()]:
+            max_diff_call = max(max_diff_call, abs(hu_strat["sb_call_jam"][c] - mw_strat["phase2"][0][1][()][c]))
 
     print(f"  max diff (169 classes): open={max_diff_open:.8f} jam={max_diff_jam:.8f} call_vs_jam={max_diff_call:.8f}")
     # Lockstep = mesma sequencia de maos nos dois -- sem ruido de
@@ -217,7 +217,8 @@ def test_checagem_sorteia_adversarios_condicionados_ao_historico():
 
     avg = {
         "phase1": [{c: 0.0 for c in _CLASSES} for _ in range(solver.n_seats)],
-        "phase2": [{j: {c: 0.0 for c in _CLASSES} for j in solver.phase2[i]} for i in range(solver.n_seats)],
+        "phase2": [{j: {k: {c: 0.0 for c in _CLASSES} for k in solver.phase2[i][j]} for j in solver.phase2[i]}
+                   for i in range(solver.n_seats)],
     }
     for c in _CLASSES:
         avg["phase1"][0][c] = 1.0 if "A" in c else 0.0
@@ -284,6 +285,31 @@ def test_oraculo_de_mesas_bate_com_calculo_independente():
           f"(AA vs KK com os outros 2 ases mortos: {eq_oracle[0]:.3f})\n")
 
 
+def test_overcall_decisao_separada_por_quem_ja_pagou():
+    print("--- 7. Overcall: decisão de pagar depende de quem já pagou antes ---")
+    import run_offline_all_positions as offline
+    config = offline.build_matchup_config("CO", 15.0)
+    solver = MultiwayRfiSolver(equity_matrix=None, classes=_CLASSES, **config)
+    # CO=0, BTN=1, SB=2, BB=3. Jam do BTN: responde SB, depois BB, depois CO.
+    assert solver._possible_callers(3, 1) == [(), (2,)]
+    assert solver._possible_callers(0, 1) == [(), (2,), (3,), (2, 3)]
+    assert solver._possible_callers(2, 1) == [()]
+    solver.train(iterations=3000, seed=5)
+    for callers in ((), (2,)):
+        visited = sum(sum(inf.strategy_sum) for inf in solver.phase2[3][1][callers].values())
+        assert visited > 0, f"BB vs jam do BTN com {callers} ja' tendo pago nunca foi treinado"
+    # sorteio condicionado: SB (seat 2) só paga o jam do BTN com AA
+    avg = solver.average_strategy()
+    for c in _CLASSES:
+        avg["phase2"][2][1][()][c] = 1.0 if c == "AA" else 0.0
+    rng = random.Random(8)
+    got = solver._sample_posterior(3, "KK", avg, rng, 15, jammer=1, callers=(2,))
+    assert got and all(h[2] == "AA" for h in got), "com SB tendo pago, o SB tem que ter AA"
+    got = solver._sample_posterior(3, "KK", avg, rng, 15, jammer=1, callers=())
+    assert got and all(h[2] != "AA" for h in got), "com SB tendo foldado, o SB não pode ter AA"
+    print("  OK -- grupos de 'quem já pagou' certos, treinados separadamente e usados no sorteio condicionado\n")
+
+
 def test_estado_exporta_e_importa_igual():
     print("--- 5. Checkpoint: exportar/importar estado reproduz o treino exatamente ---")
     import run_offline_all_positions as offline
@@ -304,5 +330,6 @@ if __name__ == "__main__":
     test_cartas_de_verdade_sem_mao_impossivel()
     test_checagem_sorteia_adversarios_condicionados_ao_historico()
     test_oraculo_de_mesas_bate_com_calculo_independente()
+    test_overcall_decisao_separada_por_quem_ja_pagou()
     test_estado_exporta_e_importa_igual()
     print("Todos os testes de multiway_rfi passaram.")
