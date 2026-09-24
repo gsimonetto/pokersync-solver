@@ -34,11 +34,12 @@ PAYOUTS = [500.0, 300.0, 200.0]
 ITERATIONS = 60_000
 SEED = 42
 
-# build_final_equity_matrix NAO e' deterministica entre chamadas
-# separadas no mesmo processo (confirmado: legacy vs legacy, mesma
-# seed, diverge se cada um builda a propria matriz) -- entao os testes
-# aqui buildam UMA matriz e reusam nos dois solvers, isolando o que
-# realmente queremos comparar (a logica do solver, nao a da equity).
+# Ate' 2026-09-24 build_final_equity_matrix NAO era deterministica entre
+# chamadas separadas (o treys.Deck() usava um gerador proprio, fora do
+# controle da seed); agora e' (avaliador proprio + gerador semeado). Os
+# testes continuam buildando UMA matriz e reusando nos dois solvers --
+# isola o que realmente queremos comparar (a logica do solver, nao a da
+# equity) e economiza tempo.
 _EQUITY_MATRIX, _CLASSES, _ = build_final_equity_matrix(fast_iterations=60, blocker_iterations=60, seed=7)
 
 
@@ -55,7 +56,10 @@ def build_solver(cls, **kwargs):
 def test_regression_single_size():
     print("--- 1. Regressão: open_sizes=[2.2] vs motor antigo ---")
     legacy = build_solver(RfiJamSolverLegacy, open_size=2.2)
-    new = build_solver(RfiJamSolver, open_sizes=[2.2])
+    # card_removal=False: o motor antigo sorteia as classes de SB e BB de
+    # forma independente; a remocao de cartas (2026-09-24) muda a
+    # distribuicao de proposito, entao a regressao exata so' vale sem ela.
+    new = build_solver(RfiJamSolver, open_sizes=[2.2], card_removal=False)
 
     strat_legacy = legacy.average_strategy()
     strat_new = new.average_strategy()

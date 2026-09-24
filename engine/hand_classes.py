@@ -56,20 +56,41 @@ def representative_combo(hand_class: str) -> str:
     return f"{r1}s{r2}h"
 
 
+def representative_combo_avoiding(hand_class: str, used_cards) -> str:
+    """Primeiro combo da classe (na ordem de naipes s, h, d, c) que não usa
+    nenhuma carta de `used_cards`. Sempre existe: uma mão de 2 cartas
+    bloqueia no máximo 2 dos combos possíveis de qualquer classe."""
+    used = set(used_cards)
+    if len(hand_class) == 2:
+        r = hand_class[0]
+        candidates = [f"{r}{s1}{r}{s2}" for i, s1 in enumerate(SUITS) for s2 in SUITS[i + 1:]]
+    elif hand_class[2] == "s":
+        candidates = [f"{hand_class[0]}{s}{hand_class[1]}{s}" for s in SUITS]
+    else:
+        candidates = [f"{hand_class[0]}{s1}{hand_class[1]}{s2}" for s1 in SUITS for s2 in SUITS if s1 != s2]
+    for combo in candidates:
+        if combo[0:2] not in used and combo[2:4] not in used:
+            return combo
+    raise ValueError(f"nenhum combo de {hand_class} livre de {sorted(used)}")
+
+
 def build_equity_matrix(iterations=600, seed=7):
     """Retorna dict[(classe_a, classe_b)] -> equity de a contra b.
     Simetrico: equity(a,b) = 1 - equity(b,a) (aproximado, ignora
-    empates residuais de arredondamento)."""
+    empates residuais de arredondamento).
+
+    Correcao (2026-09-24): o desvio de colisao antigo (trocar 'h' por 'd'
+    ou 's' por 'c' no combo de b) nem sempre resolvia -- ex: AA (AsAh)
+    contra AKo (AsKh) virava AsAh vs AsKd, as DUAS maos com o As, e a
+    equity saia de uma mesa impossivel. Afetava os testes de push/fold e o
+    PushFoldSolver sem matriz informada (os jobs de producao sempre passam
+    a matriz de engine/equity_final.py, que nao tinha esse problema)."""
     classes = all_hand_classes()
     matrix = {}
     total_pairs = 0
     for a, b in itertools.combinations(classes, 2):
         combo_a = representative_combo(a)
-        combo_b = representative_combo(b)
-        # evita conflito de carta entre representativos de classes diferentes
-        if set([combo_a[0:2], combo_a[2:4]]) & set([combo_b[0:2], combo_b[2:4]]):
-            # tenta naipes alternativos pro combo_b pra evitar colisao
-            combo_b = combo_b.replace("h", "d") if "h" in combo_b else combo_b.replace("s", "c")
+        combo_b = representative_combo_avoiding(b, [combo_a[0:2], combo_a[2:4]])
         eq = hand_vs_hand_equity(combo_a, combo_b, iterations=iterations, seed=seed)
         matrix[(a, b)] = eq
         matrix[(b, a)] = 1.0 - eq

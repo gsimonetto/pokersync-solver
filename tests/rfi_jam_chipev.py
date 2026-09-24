@@ -84,10 +84,17 @@ def test_rfi_jam_chipev_sanidade_aa_vs_lixo():
     )
     solver.train(iterations=15_000, seed=7)
     strat = solver.average_strategy()
-    aa_open = strat["sb_open"]["AA"]
-    trash_open = strat["sb_open"]["72o"]
-    print(f"  AA abre {aa_open:.3f}  72o abre {trash_open:.3f}")
-    assert aa_open > trash_open + 0.1, f"AA deveria abrir bem mais que 72o em chipEV tambem: AA={aa_open} 72o={trash_open}"
+    # Correcao (2026-09-24): o teste checava "AA ABRE bem mais que 72o", mas
+    # nessa arvore (BB so' folda ou da' all-in de 100bb) o equilibrio e' o
+    # SB abrir QUALQUER mao: arrisca 2.2 pra ganhar 1.5 e o BB quase sempre
+    # folda (conferido com 300k iteracoes: 72o abre 99.8%, EV +0.39 contra
+    # -0.50 de desistir). O teste so' passava porque 15k iteracoes ainda
+    # nao tinham convergido. A leitura qualitativa robusta aqui e' a do
+    # BB: all-in de 100bb so' com mao forte (AA sempre, 72o nunca).
+    aa_jam = strat["bb_jam"]["AA"]
+    trash_jam = strat["bb_jam"]["72o"]
+    print(f"  BB all-in: AA {aa_jam:.3f}  72o {trash_jam:.3f}  (SB abre 72o {strat['sb_open']['72o']:.3f}, correto ~1)")
+    assert aa_jam > 0.9 and trash_jam < 0.1, f"BB deveria dar all-in com AA e nunca com 72o: AA={aa_jam} 72o={trash_jam}"
     print("  OK.\n")
 
 

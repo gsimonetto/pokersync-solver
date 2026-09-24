@@ -20,11 +20,17 @@ jobs:
       - name: Núcleo do CFR (Kuhn Poker, exploitability conhecida)
         run: python tests/kuhn_poker.py
 
-      - name: ICM (Malmuth-Harville) — propriedades matemáticas
+      - name: ICM (Malmuth-Harville) — propriedades matemáticas + vários eliminados na mesma mão
         run: python tests/icm.py
+
+      - name: Avaliador de mão rápido — ordem idêntica ao treys (todas as 2,6M mãos de 5 cartas)
+        run: python tests/fast_eval.py
 
       - name: Equity pré-flop — contra números conhecidos
         run: python tests/equity.py
+
+      - name: Matriz de equity de produção (arquivo pronto usado pelos jobs)
+        run: python tests/equity_production.py
 
       - name: Pós-flop river (MDF exata + exploitability rigorosa)
         run: python tests/postflop_river.py
@@ -37,6 +43,9 @@ jobs:
 
       - name: Pós-flop — EV por ação (gap de erro vs decisão marginal)
         run: python tests/postflop_action_evs.py
+
+      - name: Pós-flop — contabilidade com ruas anteriores e stacks diferentes
+        run: python tests/postflop_multistreet_accounting.py
 
       - name: RFI/Jam multi-tamanho (regressão contra motor legado)
         run: python tests/rfi_jam_multisize.py
@@ -64,3 +73,42 @@ jobs:
 
       - name: cEV/ICM de mão jogada (multiway)
         run: python tests/hand_cev_multiway.py
+
+      - name: API — endpoints HTTP (validação, 404, sem Supabase de verdade)
+        run: python tests/api_endpoints.py
+
+  # Instalação como no PC do usuário: Python mais novo, SÓ pacotes prontos
+  # (--only-binary, igual um Windows sem compilador C). Pega erro de
+  # instalação tipo "numpy<2.0 não existe pra Python 3.13" antes de chegar
+  # no PC, e roda o script offline de verdade por alguns segundos.
+  instalacao-pc:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.10", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Instala só o necessário pro treino offline (só pacotes prontos)
+        run: "pip install --only-binary=:all: -r requirements-offline.txt"
+
+      - name: Scripts offline importam e treinam (todas as posições, poucas iterações)
+        run: |
+          python - <<'EOF'
+          import run_offline_all_positions as R
+          import run_offline_multiway  # noqa: F401 -- só confere que importa
+          from engine.hand_classes import all_hand_classes
+          from engine.multiway_rfi import MultiwayRfiSolver
+          for opener in R.POSITIONS_QUEUE:
+              solver = MultiwayRfiSolver(equity_matrix=None, classes=all_hand_classes(),
+                                         **R.build_matchup_config(opener, 15.0))
+              solver.train(iterations=3, seed=1)
+              print(opener, "OK")
+          EOF
+
+      - name: requirements.txt completo instala (só pacotes prontos)
+        run: "pip install --only-binary=:all: -r requirements.txt"

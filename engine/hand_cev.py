@@ -21,7 +21,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from engine.equity import hand_vs_hand_equity  # noqa: E402
+from engine.equity import hand_vs_hand_outcomes  # noqa: E402
 from engine.icm import icm_equity  # noqa: E402
 
 # Carimbado em toda linha gravada (ADR-011 no Cockpit do produto), mesmo
@@ -68,12 +68,21 @@ def compute_hand_cev(
     """
     if hero_stack_before <= 0 or villain_stack_before <= 0:
         raise HandCevError("Stacks precisam ser positivos.")
+    if any(s < 0 for s in other_stacks):
+        raise HandCevError("other_stacks não pode ter stack negativo.")
     if not payouts:
         raise HandCevError("Estrutura de premiação vazia — sem payouts não há ICM pra calcular.")
 
     at_risk = min(hero_stack_before, villain_stack_before)
 
-    hero_equity = hand_vs_hand_equity(hero_combo, villain_combo, iterations=iterations, seed=seed)
+    # Cartas mal formadas ('ahkd', 'AhK', '1hKd') ou repetidas entre as duas
+    # mãos viram erro claro (422 na API) em vez de KeyError solto do treys
+    # (erro 500) ou de uma equity sem sentido calculada com carta duplicada.
+    try:
+        p_win, p_tie, p_lose = hand_vs_hand_outcomes(hero_combo, villain_combo, iterations=iterations, seed=seed)
+    except ValueError as e:
+        raise HandCevError(str(e)) from e
+    hero_equity = p_win + 0.5 * p_tie
 
     # Mesa completa, na ordem: [hero, vilão, ...demais jogadores] — os
     # índices recebidos indicam onde hero/vilão ficam nessa lista pra quem
@@ -90,11 +99,20 @@ def compute_hand_cev(
     icm_if_lose = icm_equity(stacks_hero_loses, payouts)[0]
     icm_baseline = icm_equity(stacks_baseline, payouts)[0]
 
-    hero_expected_icm = hero_equity * icm_if_win + (1 - hero_equity) * icm_if_lose
+    # Correcao (2026-09): EMPATE (pote dividido) deixa os stacks como
+    # estavam -- vale o $ICM de antes da mao. Antes o empate entrava como
+    # "meia vitoria + meia derrota" (equity = vitoria + empate/2); em fichas
+    # da no mesmo (e' linear), mas em $ICM NAO: o ICM e' concavo, entao
+    # 50% ganha-tudo/50% perde-tudo vale MENOS que ficar parado. Em mao com
+    # muito empate (ex: AK vs AK, ~90% de chop) o endpoint mostrava perda de
+    # $EV que nao existe.
+    hero_expected_icm = p_win * icm_if_win + p_tie * icm_baseline + p_lose * icm_if_lose
     hero_expected_chips = hero_equity * stacks_hero_wins[0] + (1 - hero_equity) * stacks_hero_loses[0]
 
     return {
         "hero_equity_pct": round(hero_equity * 100, 2),
+        "hero_win_pct": round(p_win * 100, 2),
+        "hero_tie_pct": round(p_tie * 100, 2),
         "chips_at_risk": at_risk,
         "hero_expected_chip_delta": round(hero_expected_chips - hero_stack_before, 2),
         "hero_icm_baseline_dollars": round(icm_baseline, 4),

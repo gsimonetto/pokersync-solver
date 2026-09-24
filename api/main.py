@@ -45,7 +45,7 @@ from jobs.supabase_client import get_client
 from jobs.solve_pushfold_batch import run_pushfold_batch
 from jobs.solve_rfi_jam_batch import run_rfi_jam_batch
 from jobs.solve_postflop_batch import run_postflop_river_batch
-from engine.equity_final import build_final_equity_matrix
+from engine.equity_final import get_production_equity_matrix
 from engine.hand_cev import compute_hand_cev, HandCevError
 from engine.hand_cev_multiway import compute_hand_cev_multiway, HandCevMultiwayError
 
@@ -60,6 +60,27 @@ def check_api_key(x_api_key: Optional[str] = Header(default=None)):
     # custo de evitar é zero.
     if not expected or not x_api_key or not secrets.compare_digest(x_api_key, expected):
         raise HTTPException(status_code=401, detail="API key invalida ou ausente")
+
+
+# Mesa de ICM sempre cheia (2026-09-24, pedido do usuario): 8 ou 9
+# jogadores = os 2 do spot + 6 ou 7 em other_stacks. Com menos gente na
+# mesa o ICM sai bem diferente (cada eliminacao pesa mais), entao uma
+# lista curta por engano gerava um spot errado sem avisar ninguem.
+ICM_TABLE_SIZES = (8, 9)
+
+
+def _check_icm_table_size(use_icm: bool, other_stacks: list[float]):
+    if not use_icm:
+        return
+    n = len(other_stacks) + 2
+    if n not in ICM_TABLE_SIZES:
+        raise HTTPException(
+            status_code=422,
+            detail=f"other_stacks tem {len(other_stacks)} stacks -> mesa de {n} jogadores; "
+                   f"com ICM a mesa precisa ter 8 ou 9 (mande 6 ou 7 stacks em other_stacks)",
+        )
+    if any(s <= 0 for s in other_stacks):
+        raise HTTPException(status_code=422, detail="other_stacks precisa ter so' valores positivos")
 
 
 class PushFoldJobRequest(BaseModel):
@@ -87,6 +108,7 @@ def create_pushfold_job(req: PushFoldJobRequest, background_tasks: BackgroundTas
     check_api_key(x_api_key)
     if req.use_icm and not req.payouts:
         raise HTTPException(status_code=422, detail="payouts vazio -- obrigatorio quando use_icm=True (ou mande use_icm=false pra chipEV puro)")
+    _check_icm_table_size(req.use_icm, req.other_stacks)
 
     job_id = str(uuid.uuid4())
     client = get_client()
@@ -100,7 +122,7 @@ def create_pushfold_job(req: PushFoldJobRequest, background_tasks: BackgroundTas
 
     def _run():
         try:
-            equity_matrix, classes, _stats = build_final_equity_matrix()
+            equity_matrix, classes = get_production_equity_matrix()
             run_pushfold_batch(
                 job_id=job_id,
                 stacks_bb=req.stacks_bb,
@@ -157,6 +179,7 @@ def create_rfi_jam_job(req: RfiJamJobRequest, background_tasks: BackgroundTasks,
     check_api_key(x_api_key)
     if req.use_icm and not req.payouts:
         raise HTTPException(status_code=422, detail="payouts vazio -- obrigatorio quando use_icm=True (ou mande use_icm=false pra chipEV puro)")
+    _check_icm_table_size(req.use_icm, req.other_stacks)
 
     job_id = str(uuid.uuid4())
     client = get_client()
@@ -170,7 +193,7 @@ def create_rfi_jam_job(req: RfiJamJobRequest, background_tasks: BackgroundTasks,
 
     def _run():
         try:
-            equity_matrix, classes, _stats = build_final_equity_matrix()
+            equity_matrix, classes = get_production_equity_matrix()
             run_rfi_jam_batch(
                 job_id=job_id,
                 matchups=req.matchups,
@@ -258,11 +281,19 @@ def create_postflop_river_job(req: PostflopRiverJobRequest, background_tasks: Ba
 @app.get("/jobs/{job_id}")
 def get_job(job_id: str, x_api_key: Optional[str] = Header(default=None)):
     check_api_key(x_api_key)
+    # .limit(1) em vez de .single(): com .single(), um id inexistente faz o
+    # PostgREST responder erro (0 linhas) e a biblioteca levanta excecao --
+    # virava erro 500 em vez do 404 abaixo. Id que nem e' UUID tambem vira
+    # 404 direto (o banco rejeitaria a comparacao com a coluna uuid).
+    try:
+        uuid.UUID(job_id)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="Job nao encontrado")
     client = get_client()
-    result = client.table("solver_jobs").select("*").eq("id", job_id).single().execute()
+    result = client.table("solver_jobs").select("*").eq("id", job_id).limit(1).execute()
     if not result.data:
         raise HTTPException(status_code=404, detail="Job nao encontrado")
-    return result.data
+    return result.data[0]
 
 
 class HandCevRequest(BaseModel):

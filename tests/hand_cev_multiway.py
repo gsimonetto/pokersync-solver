@@ -69,6 +69,34 @@ def test_conservacao_de_fichas_entre_envolvidos():
     assert abs(total_delta) < 5.0, f"Fichas nao conservadas entre os 3 jogadores: soma={total_delta:.2f}"
 
 
+def test_dois_eliminados_na_mesma_mao_nao_quebra():
+    """Regressão (2026-09-24): 3-way com stacks iguais -- quem ganha
+    elimina os outros dois; com poucos jogadores de fora e 3 prêmios, o ICM
+    antigo dividia por zero (erro 500 no endpoint)."""
+    from engine.icm import icm_equity
+    r = compute_hand_cev_multiway(
+        combos=["AhAd", "KsKc", "QdQc"], stacks_before=[2000, 2000, 2000],
+        other_stacks=[5000], hero_idx=1, payouts=[500.0, 300.0, 200.0], iterations=2000, seed=4,
+    )
+    assert r["hero_expected_icm_dollars"] == r["hero_expected_icm_dollars"]  # sem NaN
+    # KK quebra junto com QQ quando AA ganha: eles dividem o 3o prêmio (100
+    # cada); nunca pode valer menos que isso nem mais que o 1o prêmio
+    assert 100.0 <= r["hero_expected_icm_dollars"] <= 500.0, r
+    baseline = icm_equity([2000, 2000, 2000, 5000], [500.0, 300.0, 200.0])[1]
+    assert abs(r["hero_icm_baseline_dollars"] - round(baseline, 4)) < 1e-6
+
+
+def test_rejeita_combo_invalido():
+    from engine.hand_cev_multiway import HandCevMultiwayError
+    for combos in (["AhAd", "kskc", "QdQc"], ["AhAd", "KsK", "QdQc"], ["AhAd", "AhKc", "QdQc"]):
+        try:
+            compute_hand_cev_multiway(combos=combos, stacks_before=[1000, 1000, 1000], other_stacks=[],
+                                      hero_idx=0, payouts=[100.0], iterations=10)
+            assert False, f"deveria rejeitar {combos}"
+        except HandCevMultiwayError:
+            pass
+
+
 if __name__ == "__main__":
     test_caso_degenerado_n2_bate_com_heads_up()
     print("  OK -- caso degenerado N=2 bate com o motor heads-up")
@@ -76,4 +104,8 @@ if __name__ == "__main__":
     print("  OK -- side pot limita o ganho do jogador curto")
     test_conservacao_de_fichas_entre_envolvidos()
     print("  OK -- conservacao de fichas entre os 3 jogadores envolvidos")
+    test_dois_eliminados_na_mesma_mao_nao_quebra()
+    print("  OK -- 2 eliminados na mesma mao: sem ZeroDivisionError, valor dentro do possivel")
+    test_rejeita_combo_invalido()
+    print("  OK -- combo mal formado/repetido vira HandCevMultiwayError (422), nao erro 500")
     print("Todos os testes de hand_cev_multiway passaram.")

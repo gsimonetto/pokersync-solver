@@ -51,6 +51,17 @@ novo, usar direto:
   padrão -- ver histórico abaixo sobre por que isso é necessário (não
   é só cosmético, era a causa de 40% de falso alarme num resultado
   real antes dessa correção).
+- (2026-09-24, v3) Cada flag agora também traz `se` (erro-padrão do gap)
+  e `n` (quantas mesas sorteadas), e só é apontada se o gap passar de
+  `gap_threshold` E de `z=3` erros-padrão -- candidatas ganham mais
+  amostras automaticamente (até 8x) antes de concluir. Decisões que
+  parecem erradas mas ficam dentro do ruído são contadas como
+  "inconclusivas" em `solver.last_check_summary` (e em
+  `sanity_summary` no `resultado_*.pkl`), não apontadas. `resultado_*.pkl`
+  novos também têm `engine_version` -- arquivo sem esse campo (ou com
+  versão diferente de `engine.multiway_rfi.ENGINE_VERSION`) foi gerado
+  ANTES das correções de 2026-09-24 e não deve ser usado (o script
+  offline refaz sozinho e o `--upload` recusa).
 
 Motivo: o usuário odeia retrabalho. Uma validação incompleta que exige
 voltar atrás depois (como já aconteceu) é pior do que demorar mais na
@@ -82,6 +93,68 @@ produção estava correto, só a ferramenta de checagem que mentia.
 Lição: ao investigar um `sanity_flags` suspeito, considerar SEMPRE a
 hipótese de bug na própria checagem, não só no motor -- rodar de novo
 com mais amostras/seed diferente antes de reportar como bug real.
+
+## Histórico: auditoria de 2026-09-24 (checagem v3 e motor v3)
+
+Mais três problemas NA PRÓPRIA CHECAGEM (mesma lição de sempre: antes de
+acusar o motor, desconfiar da ferramenta):
+1. **Adversários sorteados sem condicionar no histórico**: ao julgar o
+   jam do BTN depois do open do CO, a mão do CO saía de qualquer lugar do
+   baralho (inclusive mãos que o CO nunca abre), e a resposta dele ao jam
+   vinha de fichas nunca alcançadas no treino (ruído puro). Só a decisão
+   do abridor na raiz estava certa. Corrigido com `_sample_posterior`
+   (rejeição pelo histórico público: abridor abriu, quem estava no meio
+   foldou, jammer jammou) -- vale pra checagens E pra
+   `compute_exploitability`. Validado: no caso de 2 seats, o best-response
+   por amostragem bate com o best-response EXATO do motor heads-up sobre
+   a MESMA estratégia (diferenças -0.09/+0.17/+0.34/-0.12, média 0.02%).
+2. **Limite fixo sem olhar o ruído**: com 25 mesas o ruído típico do gap
+   passa de 1.0 (em $ICM), mas o limite era 0.3 -- mão marginal podia ser
+   apontada por azar do sorteio. Corrigido com a confirmação estatística
+   (`_confirm_gap`, ver acima).
+3. **Checagem não reproduzível**: o Monte Carlo de equity usava o gerador
+   global + o `treys.Deck()` (semeado pelo sistema). Agora usa um gerador
+   próprio semeado por `seed`.
+
+E no motor (`ENGINE_VERSION = multiway-rfi-v3-2026-09-24` -- checkpoints e
+resultados de versões anteriores são incompatíveis):
+- ICM dividia por zero com 2+ eliminados na mesma mão (travava HJ, MP,
+  UTG+1 e UTG na primeira iteração);
+- mãos agora saem de um baralho de verdade (`card_removal=True`); antes
+  cada seat sorteava a classe independente e saíam mesas impossíveis
+  (3x AA) com equity inventada;
+- showdown em chipEV perdia o valor negativo de quem foldou com dinheiro
+  no pote;
+- cache de equity só guarda showdowns de até 3 jogadores (antes crescia
+  sem limite: dezenas de GB em UTG);
+- avaliador de mão próprio (`engine/fast_eval.py`), ordem idêntica à do
+  treys (testado nas 2.598.960 mãos de 5 cartas) -- treino ~15x mais
+  rápido.
+
+## Motor v4 (2026-09-24, pedido do usuário)
+
+`ENGINE_VERSION = multiway-rfi-v4-2026-09-24` -- resultados/checkpoints v3
+são incompatíveis (o script offline refaz sozinho, o `--upload` recusa).
+
+- **Overcall**: a ficha de fase 2 agora é (seat, jammer, quem JÁ PAGOU,
+  mão) -- `phase2[seat][jammer][callers][classe]`, `callers` = tupla
+  ordenada dos seats que pagaram antes (`()` = ninguém). Nas checagens,
+  cada flag de `phase2` traz também `callers`. Nós que quase nunca
+  acontecem (< `MIN_NODE_FREQ` = 0,01% das mãos) não são checados --
+  contados em `rare_nodes_skipped` no resumo.
+- **Mesa de ICM sempre com 8 ou 9 jogadores** (`--mesa 8|9` no script
+  offline; a API recusa `other_stacks` que não dê 8 ou 9 com ICM). O
+  ante já sai do stack de todo mundo antes do ICM.
+- **Heads-up com remoção de cartas** (`card_removal=True` padrão em
+  `rfi_jam.py`, `pushfold.py`, `pushfold_icm.py`): P(mão do oponente |
+  minha mão) exata, via `engine/card_removal.py`. `card_removal=False`
+  só existe pra testes de regressão contra o motor antigo.
+- **Matriz de equity de produção** (`get_production_equity_matrix()` em
+  `engine/equity_final.py`): todos os pares com carta real, 4000
+  simulações por par, pronta em `engine/data/equity_matrix_169.json`.
+  Os jobs da API usam ela. Spots heads-up gravados no Supabase antes
+  disso foram gerados sem remoção de cartas e com a matriz antiga --
+  precisam ser regerados pelos jobs.
 
 ## Nota sobre `use_cfr_plus`
 

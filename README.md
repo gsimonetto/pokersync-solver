@@ -23,12 +23,22 @@ evita que uma mudança no motor quebre o deploy do produto.
 
 ## Setup local
 
+Precisa de **Python 3.10 ou mais novo** (testado em 3.10, 3.11 e 3.13).
+
 ```bash
 python3 -m venv .venv
-source .venv/bin/activate
+source .venv/bin/activate        # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 cp .env.example .env  # preencher SUPABASE_SERVICE_ROLE_KEY e SOLVER_API_KEY
 ```
+
+Só vai rodar o treino offline no PC (`run_offline_*.py`)? Basta
+`pip install -r requirements-offline.txt` (só o `treys` -- menos coisa pra
+instalar, menos chance de erro de instalação no Windows).
+
+(2026-09-24) `requirements.txt` exigia `numpy<2.0`, que não tem instalador
+pronto pra Python 3.13+ -- no Windows sem compilador C a instalação falhava
+e nada rodava. Agora aceita numpy 2 (testado: push/fold idêntico).
 
 Validar o núcleo antes de qualquer coisa:
 ```bash
@@ -89,7 +99,7 @@ await fetch(`${SOLVER_API_URL}/jobs/pushfold`, {
   },
   body: JSON.stringify({
     stacks_bb: [10, 15, 20],
-    other_stacks: [40, 25, 18, 12],
+    other_stacks: [40, 25, 18, 12, 30, 20], // 6 ou 7 stacks: mesa de 8 ou 9 (obrigatorio com ICM)
     payouts: [500, 300, 200],
   }),
 });
@@ -304,6 +314,42 @@ validada em produção o suficiente pra confiar no gap exposto (ver
   de 2026-09, precisa refazer do zero** (apague `checkpoint_*.pkl`,
   `resultado_*.pkl` e `data/equity_matrix_cache.pkl`) — o treino usava
   a lógica com o bug de reach probability acima.
+- ✅ **(2026-09-24) Auditoria completa do motor multiway** (versão
+  `multiway-rfi-v3-2026-09-24`; checkpoints/resultados anteriores são
+  refeitos sozinhos pelos scripts, ver CLAUDE.md):
+  - ICM dividia por zero com 2+ jogadores eliminados na mesma mão — HJ,
+    MP, UTG+1 e UTG **travavam na primeira iteração**. Corrigido em
+    `engine/icm.py` (mesmos números de antes nos casos que funcionavam,
+    agora com regra de desempate de quem quebra junto, e ~400x mais
+    rápido com muitos premiados).
+  - Mãos saem de um **baralho de verdade**: antes cada seat sorteava a
+    classe sozinho e saíam mesas impossíveis (3x AA) com equity
+    inventada. Equity de showdown agora vem de um "oráculo de mesas" por
+    mão sorteada (cartas de quem foldou saem do baralho), com avaliador
+    próprio `engine/fast_eval.py` (ordem de mãos idêntica ao treys,
+    testado nas 2,6 milhões de mãos de 5 cartas): treino ~57x (CO) a ~130x (UTG) mais
+    rápido e sem cache (memória ~20 MB).
+  - Showdown em chipEV perdia a perda de quem foldou com dinheiro no pote.
+  - Checagem obrigatória e exploitability sorteavam os adversários sem
+    condicionar no que já tinha acontecido (ex: mão do abridor de
+    qualquer lugar do baralho) e apontavam mão marginal por ruído —
+    corrigido (ver CLAUDE.md, "checagem v3").
+- ✅ **(2026-09-24) Motor v4** (versão `multiway-rfi-v4-2026-09-24`;
+  resultados v3 são refeitos sozinhos pelos scripts):
+  - **Overcall**: a decisão de pagar um all-in agora depende de quem já
+    pagou antes (BB pagando sozinho vs depois do SB já ter pago são
+    decisões separadas). No `resultado_*.pkl` / drill, `phase2_vs_jam`
+    fica `{jammer: {"ninguem" | "SB+BB" ...: {mão: freq}}}`.
+  - **Mesa de ICM sempre com 8 ou 9 jogadores** (`--mesa 8` padrão ou
+    `--mesa 9` no `run_offline_all_positions.py`; a API recusa jobs com
+    ICM cuja mesa não tenha 8 ou 9). spot_id ganha o sufixo `_8max`/`_9max`.
+  - **Heads-up (RFI/jam e push/fold) com remoção de cartas**: se você
+    tem um Ás, o oponente tem Ás menos vezes (como HRC/ICMIZER fazem).
+  - **Matriz de equity mais precisa** nos jobs (todos os pares com
+    carta real, 4000 simulações por par; antes 250 — erro de ~3 pontos
+    de equity por par). Vem pronta em `engine/data/equity_matrix_169.json`.
+    **Spots heads-up já gravados no Supabase precisam ser regerados**
+    pelos jobs pra pegar essas duas melhorias.
 - ✅ **chipEV puro (sem ICM)** — RFI/jam (`RfiJamSolver(use_icm=False)`),
   multiway (`MultiwayRfiSolver(use_icm=False)`) e Push/Fold
   (`engine/pushfold.py::PushFoldSolver`, motor separado, já existia)
@@ -456,18 +502,35 @@ validada em produção o suficiente pra confiar no gap exposto (ver
 
 ## Rodando o motor multiway offline (squeeze, CO vs BTN, UTG vs BB)
 
-Pensado pra rodar no SEU computador por horas/dias/semanas, não no
-sandbox de desenvolvimento. `run_offline_multiway.py` salva
-checkpoint automático — se o PC desligar ou travar, roda de novo e
-ele continua de onde parou, sem perder progresso.
+Pensado pra rodar no SEU computador, não no sandbox de desenvolvimento.
+Dois scripts, mesmas proteções (ver `offline_common.py`):
 
 ```bash
-python3 run_offline_multiway.py
+python run_offline_all_positions.py          # fila UTG..CO vs BB, 4 stacks cada
+python run_offline_all_positions.py --posicoes CO --stacks 15   # só um pedaço
+python run_offline_multiway.py               # um spot customizado (MATCHUP_CONFIG)
+python run_offline_all_positions.py --upload --dry-run          # confere o que subiria
 ```
 
-Ajuste `MATCHUP_CONFIG` no topo do arquivo pro spot desejado (nomes
-dos seats, quem tem blind, stacks, payouts). O exemplo padrão já vem
-configurado pra um squeeze de 3 jogadores.
+- **Checkpoint** a cada ~10 minutos, gravado de forma atômica (se o PC
+  desligar no meio da gravação, sobra a versão anterior inteira). Pode
+  fechar/desligar quando quiser; rodando de novo, continua de onde parou.
+  Ctrl+C salva e sai.
+- Checkpoint/resultado de **versão antiga do motor**, estragado ou de
+  outra configuração é detectado, **renomeado** (nunca apagado) e refeito,
+  com aviso -- antes isso quebrava com `AttributeError`/`EOFError`.
+- No fim de cada combinação roda a **avaliação obrigatória** (ver
+  CLAUDE.md) e grava `resultado_<spot>.pkl`.
+
+**Velocidade medida (2026-09-24, sandbox, 1 núcleo):** CO ~570 it/s, HJ
+~340, MP ~170, UTG+1 ~80, UTG ~40 -- com o alvo padrão de 1 milhão de
+iterações, a fila inteira (20 combinações) leva uns 2-3 dias de PC ligado
+(antes da auditoria: CO ~10 it/s e HJ em diante travavam). Memória ~20 MB
+por treino (antes crescia sem limite).
+
+Ajuste `MATCHUP_CONFIG` no topo de `run_offline_multiway.py` pro spot
+desejado (nomes dos seats, quem tem blind, stacks, payouts). O exemplo
+padrão já vem configurado pra um squeeze de 3 jogadores.
 
 **Antes de confiar no resultado:** mãos claramente fortes/fracas (AA,
 KK, trash em posição ruim) devem convergir de forma ESTÁVEL entre

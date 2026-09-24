@@ -233,5 +233,9 @@ def run_rfi_jam_batch(job_id: str | None, matchups: list[str], stacks_bb: list[f
                 }).eq("id", job_id).execute()
 
     if client:
-        client.table("drills").insert(results).execute()
+        # upsert por spot_id (nao insert): spot_id e' deterministico (ver
+        # acima), entao re-rodar o mesmo matchup/stack com insert dava erro
+        # de chave duplicada no final do job (depois de horas de treino) --
+        # mesmo ajuste ja' feito no push/fold e no pos-flop.
+        client.table("drills").upsert(results, on_conflict="spot_id").execute()
     return results

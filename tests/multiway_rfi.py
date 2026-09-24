@@ -107,8 +107,8 @@ def test_lockstep_2_seats_reproduz_heads_up():
     for c in _CLASSES:
         max_diff_open = max(max_diff_open, abs(hu_strat["sb_open"][c] - mw_strat["phase1"][0][c]))
         max_diff_jam = max(max_diff_jam, abs(hu_strat["bb_jam"][c] - mw_strat["phase1"][1][c]))
-        if c in mw.phase2[0][1]:
-            max_diff_call = max(max_diff_call, abs(hu_strat["sb_call_jam"][c] - mw_strat["phase2"][0][1][c]))
+        if c in mw.phase2[0][1][()]:
+            max_diff_call = max(max_diff_call, abs(hu_strat["sb_call_jam"][c] - mw_strat["phase2"][0][1][()][c]))
 
     print(f"  max diff (169 classes): open={max_diff_open:.8f} jam={max_diff_jam:.8f} call_vs_jam={max_diff_call:.8f}")
     # Lockstep = mesma sequencia de maos nos dois -- sem ruido de
@@ -123,6 +123,9 @@ def test_lockstep_2_seats_reproduz_heads_up():
 
 def test_sanidade_3_seats():
     print("--- 2. Sanidade multiway (3 seats: abridor, MP, BB) ---")
+    # (o patch da matriz só vale pra mesa SEM cartas de verdade; aqui o
+    # treino usa card_removal=True, padrão, e a equity sai do oráculo de
+    # mesas -- ver engine/multiway_rfi.py::_BoardOracle)
     _patch_multiway_eq_to_use_matrix(_EQUITY_MATRIX)
 
     config = {
@@ -172,7 +175,161 @@ def test_sanidade_3_seats():
     print("  OK -- abridor abre premium >> lixo, exploitability sem outlier grosseiro.\n")
 
 
+def _solver_8_seats(**kwargs):
+    import run_offline_all_positions as offline
+    config = offline.build_matchup_config("UTG", 15.0)
+    return MultiwayRfiSolver(equity_matrix=None, classes=_CLASSES, **config, **kwargs)
+
+
+def test_cartas_de_verdade_sem_mao_impossivel():
+    print("--- 3. Cartas dadas de verdade (card_removal) ---")
+    solver = _solver_8_seats()
+    rng = random.Random(3)
+    # 8 seats, 20 mil mesas: nunca mais de 4 cartas do mesmo valor (antes,
+    # sorteando a classe de cada seat independente, saia ex 3x AA)
+    for _ in range(20_000):
+        hands = solver._deal_hands(rng)
+        count = {}
+        for h in hands.values():
+            for r in (h[0], h[1]):
+                count[r] = count.get(r, 0) + 1
+        assert max(count.values()) <= 4, f"mesa impossivel: {hands}"
+    # condicionado: quem tem AA deixa só 2 ases pros outros 7 seats
+    for _ in range(5_000):
+        hands = solver._sample_other_hands(0, "AA", rng)
+        aces = sum(h.count("A") for s, h in hands.items() if s != 0)
+        assert aces <= 2, f"sobraram só 2 ases, mas os outros têm {aces}: {hands}"
+    # frequência de AA num seat ~ 6/1326 (0,45%)
+    n = 60_000
+    freq_aa = sum(solver._deal_hands(rng)[0] == "AA" for _ in range(n)) / n
+    assert abs(freq_aa - 6 / 1326) < 0.0015, freq_aa
+    print(f"  OK -- 20 mil mesas de 8 seats sem mão impossível; AA sai {100 * freq_aa:.2f}% (esperado 0,45%)\n")
+
+
+def test_checagem_sorteia_adversarios_condicionados_ao_historico():
+    print("--- 4. Checagens/best-response: adversários condicionados ao que já aconteceu ---")
+    solver = _solver_8_seats()
+    rng = random.Random(9)
+    # estratégia fictícia: abridor só abre mão com Ás; seats 1 e 2 jammam
+    # qualquer par; o seat 3 jamma só par (e nada mais jamma)
+    def is_pair(c):
+        return len(c) == 2
+
+    avg = {
+        "phase1": [{c: 0.0 for c in _CLASSES} for _ in range(solver.n_seats)],
+        "phase2": [{j: {k: {c: 0.0 for c in _CLASSES} for k in solver.phase2[i][j]} for j in solver.phase2[i]}
+                   for i in range(solver.n_seats)],
+    }
+    for c in _CLASSES:
+        avg["phase1"][0][c] = 1.0 if "A" in c else 0.0
+        for seat in (1, 2, 3):
+            avg["phase1"][seat][c] = 1.0 if is_pair(c) else 0.0
+    # decisão de fase 1 do seat 5: abridor TEM Ás; seats 1..4 foldaram
+    # (então 1, 2, 3 NÃO têm par)
+    got = solver._sample_posterior(5, "72o", avg, rng, 30)
+    assert len(got) == 30, len(got)
+    for hands in got:
+        assert "A" in hands[0] and not any(is_pair(hands[s]) for s in (1, 2, 3)), hands
+    # resposta do seat 6 ao jam do seat 3: abridor com Ás, seats 1-2 sem
+    # par (foldaram), seat 3 COM par (jammou)
+    got = solver._sample_posterior(6, "QQ", avg, rng, 20, jammer=3)
+    assert len(got) == 20, len(got)
+    for hands in got:
+        assert "A" in hands[0] and is_pair(hands[3]), hands
+        assert not is_pair(hands[1]) and not is_pair(hands[2]), hands
+    # o próprio abridor respondendo: a mão DELE é a fixa (não passa pelo
+    # filtro de "abriu"); o resto do histórico continua valendo
+    for hands in solver._sample_posterior(0, "72o", avg, rng, 10, jammer=3):
+        assert hands[0] == "72o" and is_pair(hands[3]), hands
+    print("  OK -- mesas sorteadas respeitam 'abridor abriu', 'quem estava no meio foldou' e 'jammer jammou'\n")
+
+
+def test_oraculo_de_mesas_bate_com_calculo_independente():
+    print("--- 6. Oráculo de mesas (equity de qualquer grupo a partir das mesmas mesas) ---")
+    import math
+    from engine.equity import hand_vs_hand_outcomes
+    from engine.fast_eval import card_index, eval7
+    from engine.multiway_rfi import _BoardOracle
+
+    def holes_of(*combos):
+        return [(card_index(c[:2]), card_index(c[2:])) for c in combos]
+
+    n = 60_000
+    # 2 jogadores: contra o cálculo heads-up (código independente, equity.py)
+    oracle = _BoardOracle(holes_of("AhKd", "QsQc"), n, random.Random(1))
+    eq = oracle.equities([0, 1])[0]
+    pw, pt, _ = hand_vs_hand_outcomes("AhKd", "QsQc", iterations=n, seed=2)
+    se = math.sqrt(2 * 0.25 / n)
+    assert abs(eq - (pw + pt / 2)) < 4 * se, (eq, pw + pt / 2)
+
+    # cartas de quem FOLDOU saem do baralho: seat 2 tem os outros dois ases
+    # -> nunca sai Ás na mesa pro showdown entre 0 e 1 (conferido contra
+    # um Monte Carlo escrito aqui, que tira as 6 cartas do baralho)
+    holes = holes_of("AhAd", "KsKc", "AsAc")
+    oracle = _BoardOracle(holes, n, random.Random(3))
+    eq_oracle = oracle.equities([0, 1])
+    rng = random.Random(4)
+    deck = [c for c in range(52) if c not in {c for h in holes for c in h}]
+    wins = 0.0
+    for _ in range(n):
+        board = rng.sample(deck, 5)
+        a = eval7([*holes[0], *board])
+        b = eval7([*holes[1], *board])
+        wins += 1.0 if a > b else (0.5 if a == b else 0.0)
+    assert abs(eq_oracle[0] - wins / n) < 4 * se, (eq_oracle, wins / n)
+    # grupos diferentes da MESMA mesa: equities somam 1, memo devolve igual
+    for live in ([0, 1], [0, 2], [1, 2], [0, 1, 2]):
+        eqs = oracle.equities(live)
+        assert abs(sum(eqs.values()) - 1.0) < 1e-9 and oracle.equities(live) is eqs
+    print(f"  OK -- bate com cálculo independente; cartas de quem foldou ficam fora da mesa "
+          f"(AA vs KK com os outros 2 ases mortos: {eq_oracle[0]:.3f})\n")
+
+
+def test_overcall_decisao_separada_por_quem_ja_pagou():
+    print("--- 7. Overcall: decisão de pagar depende de quem já pagou antes ---")
+    import run_offline_all_positions as offline
+    config = offline.build_matchup_config("CO", 15.0)
+    solver = MultiwayRfiSolver(equity_matrix=None, classes=_CLASSES, **config)
+    # CO=0, BTN=1, SB=2, BB=3. Jam do BTN: responde SB, depois BB, depois CO.
+    assert solver._possible_callers(3, 1) == [(), (2,)]
+    assert solver._possible_callers(0, 1) == [(), (2,), (3,), (2, 3)]
+    assert solver._possible_callers(2, 1) == [()]
+    solver.train(iterations=3000, seed=5)
+    for callers in ((), (2,)):
+        visited = sum(sum(inf.strategy_sum) for inf in solver.phase2[3][1][callers].values())
+        assert visited > 0, f"BB vs jam do BTN com {callers} ja' tendo pago nunca foi treinado"
+    # sorteio condicionado: SB (seat 2) só paga o jam do BTN com AA
+    avg = solver.average_strategy()
+    for c in _CLASSES:
+        avg["phase2"][2][1][()][c] = 1.0 if c == "AA" else 0.0
+    rng = random.Random(8)
+    got = solver._sample_posterior(3, "KK", avg, rng, 15, jammer=1, callers=(2,))
+    assert got and all(h[2] == "AA" for h in got), "com SB tendo pago, o SB tem que ter AA"
+    got = solver._sample_posterior(3, "KK", avg, rng, 15, jammer=1, callers=())
+    assert got and all(h[2] != "AA" for h in got), "com SB tendo foldado, o SB não pode ter AA"
+    print("  OK -- grupos de 'quem já pagou' certos, treinados separadamente e usados no sorteio condicionado\n")
+
+
+def test_estado_exporta_e_importa_igual():
+    print("--- 5. Checkpoint: exportar/importar estado reproduz o treino exatamente ---")
+    import run_offline_all_positions as offline
+    config = offline.build_matchup_config("CO", 15.0)
+    a = MultiwayRfiSolver(equity_matrix=None, classes=_CLASSES, **config)
+    a.train(iterations=300, seed=1, start_t=1)
+    b = MultiwayRfiSolver(equity_matrix=None, classes=_CLASSES, **config)
+    b.import_state(a.export_state())
+    a.train(iterations=200, seed=301, start_t=301)
+    b.train(iterations=200, seed=301, start_t=301)
+    assert a.average_strategy() == b.average_strategy(), "retomar do estado exportado deveria dar o MESMO treino"
+    print("  OK -- treino retomado do estado exportado é idêntico ao treino direto\n")
+
+
 if __name__ == "__main__":
     test_lockstep_2_seats_reproduz_heads_up()
     test_sanidade_3_seats()
+    test_cartas_de_verdade_sem_mao_impossivel()
+    test_checagem_sorteia_adversarios_condicionados_ao_historico()
+    test_oraculo_de_mesas_bate_com_calculo_independente()
+    test_overcall_decisao_separada_por_quem_ja_pagou()
+    test_estado_exporta_e_importa_igual()
     print("Todos os testes de multiway_rfi passaram.")

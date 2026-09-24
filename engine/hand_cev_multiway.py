@@ -28,9 +28,9 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from engine.equity import parse_combo, EVALUATOR  # noqa: E402
+from engine.equity import parse_combo_indices  # noqa: E402
+from engine.fast_eval import eval7  # noqa: E402
 from engine.icm import icm_equity  # noqa: E402
-from treys import Deck  # noqa: E402
 
 # Carimbado em toda linha gravada (ADR-011 no Cockpit do produto) — serve
 # pra saber qual versao do calculo gerou o numero se a formula mudar.
@@ -46,9 +46,10 @@ def _distribute_allin_pot(stacks_before: list[float], scores: list[int]) -> list
     Decompõe o pote em camadas (pote principal + potes laterais), do jeito
     clássico de poker multiway all-in com stacks desiguais: cada jogador só
     concorre pelas camadas até o valor do PRÓPRIO stack (não dá pra ganhar
-    dinheiro que não colocou). `scores`: treys, MENOR = mão melhor. Retorna
-    quanto cada jogador RECEBE de volta no total (0 se não ganhou nenhuma
-    camada -- foi eliminado nesse desfecho).
+    dinheiro que não colocou). `scores`: MENOR = mão melhor (convenção do
+    treys; quem usa engine/fast_eval.py passa o valor com sinal trocado).
+    Retorna quanto cada jogador RECEBE de volta no total (0 se não ganhou
+    nenhuma camada -- foi eliminado nesse desfecho).
 
     Caso degenerado N=2 reproduz exatamente engine/hand_cev.py (só a menor
     das duas stacks se move, o resto volta pro stack maior) -- validado em
@@ -99,37 +100,52 @@ def compute_hand_cev_multiway(
         raise HandCevMultiwayError("hero_idx fora do intervalo de combos/stacks_before.")
     if not payouts:
         raise HandCevMultiwayError("Estrutura de premiação vazia — sem payouts não há ICM pra calcular.")
+    if any(s < 0 for s in other_stacks):
+        raise HandCevMultiwayError("other_stacks não pode ter stack negativo.")
+    if n > 10:
+        raise HandCevMultiwayError("No máximo 10 jogadores no mesmo all-in.")
 
-    if seed is not None:
-        random.seed(seed)
+    rng = random.Random(seed) if seed is not None else random
 
-    cards = [parse_combo(c) for c in combos]
+    try:
+        cards = [parse_combo_indices(c) for c in combos]
+    except ValueError as e:
+        raise HandCevMultiwayError(str(e)) from e
     used = set()
     for hand in cards:
         used.update(hand)
     if len(used) != 2 * n:
         raise HandCevMultiwayError("Cartas repetidas entre as mãos informadas (conflito de combo).")
+    used_mask = 0
+    for c in used:
+        used_mask |= 1 << c
 
     baseline_stacks = [*stacks_before, *other_stacks]
     icm_baseline = icm_equity(baseline_stacks, payouts)[hero_idx]
+    # Quem quebra na mesma mao: termina na frente quem comecou a mao com
+    # mais fichas (regra padrao de torneio -- ver engine/icm.py). Antes
+    # desta correcao, 2+ jogadores zerados na mesma mao podiam derrubar o
+    # calculo com ZeroDivisionError (erro 500 no endpoint).
+    tiebreak = [*stacks_before, *other_stacks]
 
     sum_chips = 0.0
     sum_icm = 0.0
     for _ in range(iterations):
-        deck = Deck()
-        # sorted() antes do shuffle: mesmo motivo documentado em
-        # engine/equity.py -- Deck() do treys embaralha com um Random()
-        # PRÓPRIO, não ligado a random.seed(); sem isso o shuffle abaixo
-        # não é reprodutível mesmo com `seed` fixo.
-        deck.cards = sorted(c for c in deck.cards if c not in used)
-        random.shuffle(deck.cards)
-        board = deck.cards[:5]
-        scores = [EVALUATOR.evaluate(board, hand) for hand in cards]
+        board = []
+        mask = used_mask
+        while len(board) < 5:
+            c = int(rng.random() * 52)
+            if mask >> c & 1:
+                continue
+            mask |= 1 << c
+            board.append(c)
+        # eval7: MAIOR = melhor; _distribute_allin_pot espera MENOR = melhor
+        scores = [-eval7([c1, c2, *board]) for c1, c2 in cards]
         winnings = _distribute_allin_pot(stacks_before, scores)
         final_stacks = [*winnings, *other_stacks]
 
         sum_chips += winnings[hero_idx]
-        sum_icm += icm_equity(final_stacks, payouts)[hero_idx]
+        sum_icm += icm_equity(final_stacks, payouts, bust_tiebreak=tiebreak)[hero_idx]
 
     hero_expected_chips = sum_chips / iterations
     hero_expected_icm = sum_icm / iterations

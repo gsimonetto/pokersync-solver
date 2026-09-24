@@ -52,7 +52,8 @@ if [ -z "$JOB_TYPE" ]; then
 fi
 shift
 
-OTHER_STACKS="[40, 25, 18, 12]"
+# 6 stacks = mesa de 8 jogadores (os 2 do spot + 6) -- a API exige 8 ou 9 com ICM
+OTHER_STACKS="[40, 25, 18, 12, 30, 20]"
 PAYOUTS="[500, 300, 200]"
 
 json_stacks() {
