@@ -324,6 +324,35 @@ def test_estado_exporta_e_importa_igual():
     print("  OK -- treino retomado do estado exportado é idêntico ao treino direto\n")
 
 
+def test_checagem_nao_aponta_por_cauda_pesada():
+    print("--- Checagem: cauda pesada no primeiro lote nao vira falso alarme ---")
+    # Jam com mao fraca: quase sempre todo mundo folda (+10 em toda mesa),
+    # raramente alguem paga (-300). As 25 primeiras mesas podem nao ter
+    # NINGUEM pagando -- erro-padrao 0 e, antes de 2026-09-25, a mao era
+    # apontada na hora (CO 40bb: 17 falsos alarmes). Agora so' conclui com
+    # todas as amostras, e ai' a perda rara aparece.
+    import random as _r
+    rng = _r.Random(3)
+    calls = {"n": 0}
+
+    def draw(k):
+        out = []
+        for _ in range(k):
+            calls["n"] += 1
+            if calls["n"] <= 25:
+                out.append(10.0)  # primeiro lote "azarado": ninguem pagou
+            else:
+                out.append(-300.0 if rng.random() < 0.05 else 10.0)
+        return out
+    stats = MultiwayRfiSolver._confirm_gap(draw, 25, 8, 0.3, trained=0.05, z=3.0)
+    assert stats["n"] == 200, stats
+    assert not stats["flag"], f"apontou por causa do primeiro lote sem variancia: {stats}"
+    # e continua apontando o que e' errado de verdade (todas as mesas concordam)
+    stats = MultiwayRfiSolver._confirm_gap(lambda k: [10.0 + (i % 3) for i in range(k)], 25, 8, 0.3, trained=0.05, z=3.0)
+    assert stats["flag"] and stats["n"] == 200, stats
+    print("  OK\n")
+
+
 if __name__ == "__main__":
     test_lockstep_2_seats_reproduz_heads_up()
     test_sanidade_3_seats()
@@ -332,4 +361,5 @@ if __name__ == "__main__":
     test_oraculo_de_mesas_bate_com_calculo_independente()
     test_overcall_decisao_separada_por_quem_ja_pagou()
     test_estado_exporta_e_importa_igual()
+    test_checagem_nao_aponta_por_cauda_pesada()
     print("Todos os testes de multiway_rfi passaram.")
