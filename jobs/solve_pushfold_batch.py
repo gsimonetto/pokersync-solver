@@ -33,7 +33,7 @@ from jobs.supabase_client import get_client  # noqa: E402
 # mesma tela/logica de veredito sem precisar de um formato novo so' pra
 # Push/Fold. spot_id tambem ficou DETERMINISTICO (sem sufixo aleatorio):
 # permite upsert (re-rodar o job atualiza o spot em vez de duplicar).
-ENGINE_VERSION = "pokersync-solver-v0.2.0-pushfold-icm"
+ENGINE_VERSION = "pokersync-solver-v0.3.0-pushfold-icm-card-removal"
 
 
 def compute_exploitability_estimate(solver: PushFoldICMSolver, strat: dict) -> float:

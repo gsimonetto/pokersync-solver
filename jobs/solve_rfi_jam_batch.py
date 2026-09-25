@@ -39,7 +39,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from engine.rfi_jam import RfiJamSolver  # noqa: E402
 from jobs.supabase_client import get_client  # noqa: E402
 
-ENGINE_VERSION = "pokersync-solver-v0.3.0-rfi-jam-validated"
+ENGINE_VERSION = "pokersync-solver-v0.4.0-rfi-jam-card-removal"
 ENGINE_VERSION_MULTISIZE = "pokersync-solver-v0.4.0-rfi-jam-multisize"
 
 # posts/dead_money por matchup -- só adicionar um matchup novo aqui
