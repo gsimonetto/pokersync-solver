@@ -1417,8 +1417,8 @@ class MultiwayRfiSolver:
         """Estatistica de uma decisao: `draw_gaps(k)` devolve ate' k
         valores de (EV da acao agressiva - EV de foldar), um por mesa
         sorteada. Se a media discorda do treino (passa do limite pro lado
-        oposto da frequencia treinada), sorteia MAIS mesas (dobrando, ate'
-        n_initial*max_factor) antes de concluir -- mesmo espirito da
+        oposto da frequencia treinada), sorteia MAIS mesas (dobrando, SEMPRE
+        ate' n_initial*max_factor) antes de concluir -- mesmo espirito da
         regra do CLAUDE.md de reconferir com mais amostras antes de
         acusar um bug. So' marca `flag` se a diferenca passar de
         `gap_threshold` E de `z` erros-padrao. None = amostras
@@ -1436,11 +1436,18 @@ class MultiwayRfiSolver:
             result = {"gap": mean, "se": se, "n": n, "flag": False, "inconclusive": False}
             if not disagrees:
                 return result
-            if abs(mean) > z * se:
-                result["flag"] = True
-                return result
+            # So' conclui com TODAS as amostras (n_max), nunca no primeiro
+            # lote (2026-09-25): o valor de um jam tem cauda pesada -- quase
+            # sempre todo mundo folda (ganho pequeno e igual em toda mesa),
+            # raramente alguem paga com mao forte (perda grande). Com 25
+            # mesas era comum nenhuma ter quem pagasse: todas davam o MESMO
+            # valor, o erro-padrao saia ~0 e a mao era apontada na hora
+            # (CO 40bb: 17 apontadas, 0 confirmadas com 200 mesas).
             if n >= n_max:
-                result["inconclusive"] = True
+                if abs(mean) > z * se:
+                    result["flag"] = True
+                else:
+                    result["inconclusive"] = True
                 return result
             more = draw_gaps(min(n, n_max - n))
             if not more:
