@@ -124,9 +124,26 @@ def test_pushfold_chipev_bate_com_icm_no_caso_degenerado():
     print("  OK -- chipEV == ICM no caso degenerado, dentro da tolerancia de dois motores independentes.\n")
 
 
+def test_job_corrige_pagar_all_in_de_mao_que_nao_abre():
+    print("--- Job RFI/Jam: mao que quase nunca abre usa a melhor acao contra o all-in ---")
+    from jobs.solve_rfi_jam_batch import fix_rarely_reached_call
+    strat = {"sb_open": {"63o": 0.02, "AA": 1.0, "99": 0.5},
+             "bb_jam": {"63o": 0.0, "AA": 1.0, "99": 0.3},
+             "sb_call_jam": {"63o": 0.82, "AA": 1.0, "99": 0.4}}
+    evs = {"sb_call_jam": {"63o": {"fold": 78.0, "call": 66.0}, "AA": {"fold": 78.0, "call": 90.0},
+                           "99": {"fold": 78.0, "call": 70.0}}}
+    fixed = fix_rarely_reached_call(strat, evs)
+    assert fixed["sb_call_jam"]["63o"] == 0.0, "63o quase nunca abre e pagar perde -- tem que virar fold"
+    assert fixed["sb_call_jam"]["AA"] == 1.0
+    assert fixed["sb_call_jam"]["99"] == 0.4, "mao que abre de verdade mantem a frequencia do treino"
+    assert strat["sb_call_jam"]["63o"] == 0.82, "nao pode alterar a estrategia original"
+    print("  OK\n")
+
+
 if __name__ == "__main__":
     test_rfi_jam_chipev_bate_com_icm_no_caso_degenerado()
     test_rfi_jam_chipev_sem_payouts_funciona_e_icm_sem_payouts_falha()
     test_rfi_jam_chipev_sanidade_aa_vs_lixo()
     test_pushfold_chipev_bate_com_icm_no_caso_degenerado()
+    test_job_corrige_pagar_all_in_de_mao_que_nao_abre()
     print("Todos os testes de rfi_jam_chipev passaram.")

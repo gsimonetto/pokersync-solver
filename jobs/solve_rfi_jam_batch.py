@@ -173,6 +173,25 @@ def build_drill_row_multisize(spot_id: str, matchup: str, solver: RfiJamSolver, 
     }
 
 
+# Abaixo disso a decisao de pagar o all-in quase nunca acontece no treino
+# (quem pagaria nem abriu) e a frequencia media dela e' ruido (2026-09-25:
+# 63o pagando o jam em 82% com pagar valendo -11, 99 pagando 92% com -10).
+RARELY_REACHED_OPEN_FREQ = 0.10
+
+
+def fix_rarely_reached_call(strat: dict, evs: dict, min_open: float = RARELY_REACHED_OPEN_FREQ) -> dict:
+    """Pra mao que quase nunca abre, a resposta ao all-in vira a melhor acao
+    pelo EV (o que um solver mostra num no' pouco alcancado) em vez da media
+    do treino, que nesse caso nao aprendeu nada. O Treino sorteia qualquer
+    mao nessa fase, entao sem isso ele cobraria 'pagar' com 63o."""
+    call = dict(strat["sb_call_jam"])
+    for c, open_freq in strat["sb_open"].items():
+        if open_freq < min_open:
+            e = evs["sb_call_jam"][c]
+            call[c] = 1.0 if e["call"] > e["fold"] else 0.0
+    return {**strat, "sb_call_jam": call}
+
+
 def run_rfi_jam_batch(job_id: str | None, matchups: list[str], stacks_bb: list[float],
                        other_stacks: list[float], payouts: list[float] | None, equity_matrix, classes,
                        open_size=2.2, open_sizes: list[float] | None = None,
@@ -215,6 +234,8 @@ def run_rfi_jam_batch(job_id: str | None, matchups: list[str], stacks_bb: list[f
             solver.train(iterations=iterations)
             strat = solver.average_strategy()
             evs = solver.compute_action_evs(strat)
+            if not multisize:
+                strat = fix_rarely_reached_call(strat, evs)
             br_sb, br_bb = solver.compute_exploitability(strat)
 
             suffix = "" if use_icm else "_chipev"
