@@ -156,6 +156,27 @@ são incompatíveis (o script offline refaz sozinho, o `--upload` recusa).
   disso foram gerados sem remoção de cartas e com a matriz antiga --
   precisam ser regerados pelos jobs.
 
+## Histórico: falso alarme por cauda pesada (2026-09-25)
+
+Primeiros resultados reais do motor v4 (CO 15/25/40bb, 5M iterações):
+o CO 40bb veio com 17 decisões apontadas, quase todas "jam com mão
+fraca devia ser mais frequente". Reconferindo com 200 mesas e outras
+seeds, **0 de 16 se confirmaram**. Causa, de novo na ferramenta: o valor
+de um jam tem cauda pesada (quase sempre todo mundo folda e o ganho é
+pequeno e igual em toda mesa; raramente alguém paga e a perda é
+grande). Com o primeiro lote de 25 mesas era comum ninguém pagar. Aí
+todas as mesas davam o mesmo valor, o erro-padrão saía ~0 e a mão era
+apontada na hora. Corrigido em `_confirm_gap`: só conclui depois de
+TODAS as amostras (`iterations * max_iterations_factor`). Teste:
+`test_checagem_nao_aponta_por_cauda_pesada`. Com a correção, os 3
+resultados dão 0 / 0 / 1 apontada. A que sobrou é real: CO 40bb com QQ
+respondendo ao jam do SB depois de o BB já ter pago, treino 48%, pagar
+vale +14. É uma situação rara (~0,4% das mãos, e QQ é só uma fração
+disso), ou seja, convergência lenta num nó raro e não bug. Os
+`sanity_flags` gravados em arquivos anteriores a essa correção podem
+ter falso alarme desse tipo: rodar `check_full_convergence` de novo
+antes de concluir qualquer coisa.
+
 ## Nota sobre `use_cfr_plus`
 
 `MultiwayRfiSolver` tem um parâmetro `use_cfr_plus` (default `True`) que
