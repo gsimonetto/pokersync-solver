@@ -186,3 +186,40 @@ convergir). Só é desligado no teste de lockstep
 (`tests/multiway_rfi.py`), porque o motor heads-up de referência
 (`engine/rfi_jam.py`) usa CFR clássico -- os dois só batem EXATAMENTE
 se rodarem o mesmo algoritmo. Isso não afeta a validação de EV acima.
+
+## Pré-flop v5 (2026-09-30) e pós-flop rápido
+
+`engine/preflop_v5.py` (`ENGINE_VERSION = preflop-v5-2026-09-30`): a mão
+inteira da mesa cheia (8 ou 9 jogadores) -- open, flat call, 3-bet/4-bet
+de tamanho normal, all-in, limp do SB, até 3 jogadores no flop. Pós-flop
+aproximado por equity realizada (EQR, `eqr_factor` -- heurística a
+CALIBRAR com o solver pós-flop). MCCFR com amostragem externa em numba,
+Discounted CFR aplicado por intervalo (`interval`), treino paralelo
+(`train(parallel=True)`). Script do PC: `run_offline_preflop_v5.py`.
+
+Validação obrigatória (mesma regra do topo deste arquivo):
+`PreflopSolver.check_convergence()` -- cobre TODAS as decisões. Passada
+geral (valor de cada ação pesado pelo alcance dos outros, sem precisar
+sortear o histórico) só escolhe candidatas; as mais importantes são
+refeitas com a checagem FOCADA (`_eval_focus`: toda mesa sorteada dá a
+mão pro jogador e só o caminho até a situação é percorrido) e só são
+apontadas se passarem de `gap_threshold` e de z erros-padrão. O resultado
+do script offline guarda `sanity_flags` e `sanity_summary` (com
+`refuted` = alarmes da passada geral desmentidos na reconferência).
+
+Lições desta versão (antes de acusar o motor, desconfiar da checagem):
+- 1a checagem (sem reconferência focada): 17 apontadas, 0 reais -- todas
+  em situações com frequência ~1e-4, alcançadas ~7 vezes em 50 mil
+  mesas; erro-padrão de 7 amostras não vale nada.
+- Mas UTG AKs 98% all-in (aumentar valia +0,15bb) era REAL: sem
+  desconto, a média carregava o começo do treino. Corrigido com o
+  desconto do DCFR por intervalo.
+- O cache do numba só confere a data do próprio arquivo: por isso nada em
+  preflop_v5.py usa `cache=True` (ver nota no código).
+
+Teste de referência: `tests/preflop_v5.py` -- heads-up só com all-in/fold
+tem que bater com o `PushFoldSolver` exato (nenhuma discordância em mão
+com diferença de EV > 0,05bb).
+
+`engine/postflop_fast.py`: solver pós-flop heads-up vetorizado (numba),
+exploitability exata; `tests/postflop_fast.py`.
