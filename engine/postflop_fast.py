@@ -282,76 +282,67 @@ def _nonconflict(opp_reach, nopp, oc1, oc2, trav_n, tc1, tc2, same):
 
 
 @njit(cache=True)
-def _showdown(opp_reach, nopp, oc1, oc2, ostr, oord, trav_n, tc1, tc2, tstr, tord, same, win_amt, lose_amt, tie_amt):
+def _showdown(opp_reach, nopp, osd, ovs, trav_n, tsd, tvs, same, win_amt, lose_amt, tie_amt):
     """Valor de showdown de cada mão de trav contra o alcance do oponente,
-    em O(n): percorre as mãos por força (ordem pré-calculada) somando o
-    alcance do oponente abaixo/acima, e desconta as mãos do oponente que
-    usam alguma carta de h (soma por carta). Empates = total sem conflito
-    - mais fracas - mais fortes."""
-    out = np.empty(trav_n)
-    card = np.zeros(52)
-    # total sem conflito, já em `out` (vezes tie_amt no fim)
-    tot = 0.0
-    for j in range(nopp):
-        if ostr[j] < 0:
-            continue
-        r = opp_reach[j]
-        tot += r
-        card[oc1[j]] += r
-        card[oc2[j]] += r
-    for i in range(trav_n):
-        if tstr[i] < 0:
-            out[i] = 0.0
-            continue
-        v = tot - card[tc1[i]] - card[tc2[i]]
+    em O(n): percorre as mãos por força somando o alcance do oponente
+    abaixo/acima, e desconta as mãos do oponente que usam alguma carta de
+    h (soma por carta). Empates = total sem conflito - mais fracas - mais
+    fortes. sd[0] = índice da mão, sd[1] = força, sd[2]/sd[3] = cartas,
+    já ordenados da mais fraca pra mais forte; só as posições >= vs são
+    mãos válidas nessa mesa (as outras usam carta da mesa)."""
+    out = np.zeros(trav_n)
+    al = np.zeros(52)   # por carta: alcance de TODAS as mãos do oponente
+    lt = np.zeros(52)   # por carta: alcance do oponente com força < st
+    le = np.zeros(52)   # por carta: alcance do oponente com força <= st
+    oi, ostr, o1, o2 = osd[0], osd[1], osd[2], osd[3]
+    ti, tstr, t1, t2 = tsd[0], tsd[1], tsd[2], tsd[3]
+    r_s = np.empty(nopp)  # alcance do oponente já na ordem de força
+    tot_al = 0.0
+    for j in range(ovs, nopp):
+        r = opp_reach[oi[j]]
+        r_s[j] = r
+        tot_al += r
+        al[o1[j]] += r
+        al[o2[j]] += r
+    tot_lt = 0.0
+    tot_le = 0.0
+    j_lt = ovs
+    j_le = ovs
+    # uma passada crescente: "mais fracas" (<) e "mais fracas ou iguais" (<=)
+    for k in range(tvs, trav_n):
+        st = tstr[k]
+        while j_lt < nopp and ostr[j_lt] < st:
+            r = r_s[j_lt]
+            tot_lt += r
+            lt[o1[j_lt]] += r
+            lt[o2[j_lt]] += r
+            j_lt += 1
+        while j_le < nopp and ostr[j_le] <= st:
+            r = r_s[j_le]
+            tot_le += r
+            le[o1[j_le]] += r
+            le[o2[j_le]] += r
+            j_le += 1
+        c1 = t1[k]
+        c2 = t2[k]
+        weaker = tot_lt - lt[c1] - lt[c2]
+        we = tot_le - le[c1] - le[c2]
+        stronger = (tot_al - al[c1] - al[c2]) - we
+        i = ti[k]
+        # a MESMA mão no oponente (mesma força) foi descontada duas vezes
+        # (usa c1 e c2): devolve uma vez -- ela conflita, não empata
         sm = same[i]
+        ties = we - weaker
         if sm >= 0:
-            v += opp_reach[sm]
-        out[i] = v * tie_amt
-    # mais fracas: + (win - tie)
-    card[:] = 0.0
-    tot = 0.0
-    dw = win_amt - tie_amt
-    j = 0
-    for k in range(trav_n):
-        i = tord[k]
-        st = tstr[i]
-        if st < 0:
-            continue
-        while j < nopp and ostr[oord[j]] < st:
-            o = oord[j]
-            if ostr[o] >= 0:
-                r = opp_reach[o]
-                tot += r
-                card[oc1[o]] += r
-                card[oc2[o]] += r
-            j += 1
-        out[i] += dw * (tot - card[tc1[i]] - card[tc2[i]])
-    # mais fortes: - (lose + tie)
-    card[:] = 0.0
-    tot = 0.0
-    dl = lose_amt + tie_amt
-    j = nopp - 1
-    for k in range(trav_n - 1, -1, -1):
-        i = tord[k]
-        st = tstr[i]
-        if st < 0:
-            continue
-        while j >= 0 and ostr[oord[j]] > st:
-            o = oord[j]
-            r = opp_reach[o]
-            tot += r
-            card[oc1[o]] += r
-            card[oc2[o]] += r
-            j -= 1
-        out[i] -= dl * (tot - card[tc1[i]] - card[tc2[i]])
+            ties += opp_reach[sm]
+        out[i] = weaker * win_amt - stronger * lose_amt + ties * tie_amt
     return out
 
 
 @njit(cache=True, nogil=True)
 def _cfr(node, trav, opp_reach, own_reach, mode,
          ntype, nplayer, nact, cstart, children, ncard, commit, nbid, cfac, regoff,
-         reg, ssum, hc, nh, same, strength, order, pot, fpos, fneg, fstrat):
+         reg, ssum, hc, nh, same, sd, vs, pot, fpos, fneg, fstrat):
     """mode 0 = treino (DCFR, atualiza trav); mode 1 = best-response de
     trav contra a estratégia MÉDIA do oponente; mode 2 = avaliação da
     estratégia média dos dois (valor do jogo)."""
@@ -370,8 +361,7 @@ def _cfr(node, trav, opp_reach, own_reach, mode,
     if t == SHOWDOWN:
         b = nbid[node]
         c = commit[node, trav]
-        return _showdown(opp_reach, on, hc[opp, 0], hc[opp, 1], strength[b, opp], order[b, opp],
-                         tn, hc[trav, 0], hc[trav, 1], strength[b, trav], order[b, trav], same[trav],
+        return _showdown(opp_reach, on, sd[b, opp], vs[b, opp], tn, sd[b, trav], vs[b, trav], same[trav],
                          pot + c, c, pot * 0.5)
     if t == CHANCE:
         res = np.zeros(tn)
@@ -388,7 +378,7 @@ def _cfr(node, trav, opp_reach, own_reach, mode,
                 if hc[trav, 0, i] == cd or hc[trav, 1, i] == cd:
                     nown[i] = 0.0
             v = _cfr(ch, trav, nopp, nown, mode, ntype, nplayer, nact, cstart, children, ncard, commit,
-                     nbid, cfac, regoff, reg, ssum, hc, nh, same, strength, order, pot, fpos, fneg, fstrat)
+                     nbid, cfac, regoff, reg, ssum, hc, nh, same, sd, vs, pot, fpos, fneg, fstrat)
             for i in range(tn):
                 if not (hc[trav, 0, i] == cd or hc[trav, 1, i] == cd):
                     res[i] += v[i]
@@ -410,8 +400,8 @@ def _cfr(node, trav, opp_reach, own_reach, mode,
         for a in range(na):
             child_own = own_reach * sig[a]
             vals[a] = _cfr(children[s0 + a], trav, opp_reach, child_own, mode, ntype, nplayer, nact, cstart,
-                           children, ncard, commit, nbid, cfac, regoff, reg, ssum, hc, nh, same, strength,
-                           order, pot, fpos, fneg, fstrat)
+                           children, ncard, commit, nbid, cfac, regoff, reg, ssum, hc, nh, same, sd,
+                           vs, pot, fpos, fneg, fstrat)
         nodev = np.zeros(tn)
         if mode == 1:
             for i in range(tn):
@@ -446,7 +436,7 @@ def _cfr(node, trav, opp_reach, own_reach, mode,
             # um adversário que desvia pra cá explora isso)
             nopp = opp_reach * sig[a]
             v = _cfr(children[s0 + a], trav, nopp, own_reach, mode, ntype, nplayer, nact, cstart, children,
-                     ncard, commit, nbid, cfac, regoff, reg, ssum, hc, nh, same, strength, order, pot,
+                     ncard, commit, nbid, cfac, regoff, reg, ssum, hc, nh, same, sd, vs, pot,
                      fpos, fneg, fstrat)
             res += v
         return res
@@ -572,7 +562,20 @@ class FastPostflopSolver:
                 o = np.argsort(strength[b, p, :nh[p]], kind="stable")
                 order[b, p, :nh[p]] = o
         self.strength = strength
-        self.order = order
+        # mesma informação ordenada por força, pro showdown ler em sequência
+        sd = np.zeros((nb, 2, 4, nmax), dtype=np.int64)
+        vs = np.zeros((nb, 2), dtype=np.int64)
+        for b in range(nb):
+            for p in range(2):
+                n_p = int(nh[p])
+                o = order[b, p, :n_p]
+                sd[b, p, 0, :n_p] = o
+                sd[b, p, 1, :n_p] = strength[b, p, o]
+                sd[b, p, 2, :n_p] = self.hc[p, 0, o]
+                sd[b, p, 3, :n_p] = self.hc[p, 1, o]
+                vs[b, p] = int(np.sum(strength[b, p, :n_p] < 0))
+        self.sd = sd
+        self.vs = vs
 
     @property
     def n_nodes(self):
@@ -587,7 +590,7 @@ class FastPostflopSolver:
         return _cfr(node, trav, opp_reach, own_reach, mode,
                     self.ntype, self.nplayer, self.nact, self.cstart, self.children, self.ncard,
                     self.commit, self.nbid, self.cfac, self.regoff, self.reg, self.ssum, self.hc,
-                    self.nh, self.same, self.strength, self.order, self.pot, f[0], f[1], f[2])
+                    self.nh, self.same, self.sd, self.vs, self.pot, f[0], f[1], f[2])
 
     def _drive(self, node, trav, opp_reach, own_reach, mode, f):
         """Mesma conta de `_cfr`, mas feita em Python nos nós de ANTES da

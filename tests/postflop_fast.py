@@ -18,7 +18,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from engine.hand_classes import all_hand_classes  # noqa: E402
-from engine.postflop_fast import FastPostflopSolver, TreeConfig  # noqa: E402
+import numpy as np  # noqa: E402
+
+from engine.postflop_fast import FastPostflopSolver, TreeConfig, _showdown  # noqa: E402
 
 RIVER = "Ah Kd 7s 2c 9h"
 # 83o e 54o não fazem nem par nesse board: sempre perdem pra QQ
@@ -29,6 +31,29 @@ POT = 20.0
 C = all_hand_classes()
 R_IP = {c: 1.0 for c in C[:80]}
 R_OOP = {c: 1.0 for c in C[20:95]}
+
+
+def test_showdown_bate_com_conta_direta():
+    """O showdown rápido (uma passada, somas por carta) tem que dar
+    exatamente o mesmo que comparar mão a mão."""
+    s = FastPostflopSolver(RIVER, {c: 1.0 for c in C[:120]}, {c: 1.0 for c in C[30:160]}, 5.5, 40.0)
+    rng = np.random.default_rng(1)
+    for trav in (0, 1):
+        opp = 1 - trav
+        reach = rng.random(s.nh[opp])
+        out = _showdown(reach, s.nh[opp], s.sd[0, opp], s.vs[0, opp], s.nh[trav], s.sd[0, trav],
+                        s.vs[0, trav], s.same[trav], 7.0, 3.0, 2.75)
+        pior = 0.0
+        for i, (a1, a2) in enumerate(s.hands[trav][0]):
+            v = 0.0
+            for j, (b1, b2) in enumerate(s.hands[opp][0]):
+                if len({a1, a2, b1, b2}) < 4:
+                    continue
+                x, y = s.strength[0, trav, i], s.strength[0, opp, j]
+                v += reach[j] * (7.0 if x > y else -3.0 if x < y else 2.75)
+            pior = max(pior, abs(v - out[i]))
+        print(f"  jogador {trav}: maior diferença {pior:.2e}")
+        assert pior < 1e-9, pior
 
 
 def test_mdf():
