@@ -32,7 +32,7 @@ from numba import njit, prange
 
 from engine.card_removal import CLASS_OF
 from engine.hand_classes import all_hand_classes
-from engine.icm import icm_equity
+from engine.icm_groups import SCENARIOS, icm_grouped, scenario_payouts
 from engine.nb_eval import eval_cards
 
 ENGINE_VERSION = "preflop-v5-2026-09-30"
@@ -68,12 +68,17 @@ def default_open_size(stack):
 
 
 class PreflopConfig:
-    """stack = pilha de cada jogador ANTES do ante (todos iguais).
-    payouts=None -> chipEV; lista -> ICM com esses prêmios."""
+    """stack = pilha de cada jogador ANTES do ante (todos iguais na mesa).
+    Valores: chipEV (padrão), ou ICM com `icm` = nome de um cenário de
+    engine/icm_groups.SCENARIOS (bolha, perto_ft, mesa_final, satelite),
+    ou ICM com `payouts` + `other_stacks` (jogadores das outras mesas)
+    dados à mão. Em ICM os valores saem em "bb de ICM" (prize pool =
+    total de fichas) e relativos ao começo da mão."""
 
     def __init__(self, stack, n_players=8, ante=0.125, open_size=None, sb_open_size=3.0,
                  bb_iso_size=3.5, threebet_ip=3.0, threebet_oop=4.0, per_caller=1.0,
-                 fourbet_mult=2.3, jam_threshold=0.4, max_flop=3, sb_limp=True, payouts=None):
+                 fourbet_mult=2.3, jam_threshold=0.4, max_flop=3, sb_limp=True, payouts=None,
+                 other_stacks=(), icm=None):
         if n_players not in POSITIONS:
             raise ValueError("n_players precisa ser 8 ou 9 (2 só pra testes)")
         self.stack = float(stack)
@@ -89,7 +94,13 @@ class PreflopConfig:
         self.jam_threshold = jam_threshold
         self.max_flop = max_flop
         self.sb_limp = sb_limp
-        self.payouts = payouts
+        if icm is not None:
+            if icm not in SCENARIOS:
+                raise ValueError(f"cenário de ICM desconhecido: {icm!r} (use um de {', '.join(SCENARIOS)})")
+            payouts, other_stacks = scenario_payouts(icm, n_players, self.stack)
+        self.icm = icm
+        self.payouts = list(payouts) if payouts is not None else None
+        self.other_stacks = [float(x) for x in other_stacks]
         self.eff = self.stack - self.ante  # o que cada um pode apostar
 
     @property
@@ -334,6 +345,9 @@ class PreflopTree:
         self.teqr = np.ones((nt, 3, 169))      # fator EQR do k-ésimo vivo por classe
         ante_pool = cfg.ante * n
         pay_cache = {}
+        icm_base = 0.0
+        if cfg.payouts is not None:  # $ de cada um no começo da mão (antes do ante)
+            icm_base = icm_grouped([cfg.stack] * n + cfg.other_stacks, cfg.payouts)[0]
         for t, (kind, live, commit) in enumerate(self.terms):
             self.tkind[t] = kind
             self.tnlive[t] = len(live)
@@ -346,7 +360,9 @@ class PreflopTree:
                     if cfg.payouts is None:
                         pay_cache[key] = [x - cfg.stack for x in final]
                     else:
-                        pay_cache[key] = icm_equity(final, cfg.payouts, [cfg.stack] * n)
+                        # mesa + outras mesas (que não mudam nesta mão)
+                        eq = icm_grouped(list(final) + cfg.other_stacks, cfg.payouts)
+                        pay_cache[key] = [eq[s] - icm_base for s in range(n)]
                 self.tpay[t, k] = pay_cache[key]
             if kind == T_FLOP:
                 c = commit[live[0]]
@@ -895,6 +911,13 @@ class PreflopSolver:
         _eval_many(deals, n, boards, 1, CLASS_OF_CARDS, *self._arrays(), self.ssum,
                    cv, cw, nw, gb, gm, gmean, sq, ev)
         ev /= deals
+        # frequência de cada situação (chance por mão de chegar nela) --
+        # situação com frequência ~0 nunca acontece no equilíbrio e a
+        # resposta ali não é treinada (não mostrar no modo treino)
+        self.node_freq = {}
+        for nid in np.nonzero(tr.ntype == PLAYER)[0]:
+            off = int(tr.regoff[nid])
+            self.node_freq[int(nid)] = float(nw[off:off + 169].sum() / deals)
         cands = []
         rare = 0
         for nid in np.nonzero(tr.ntype == PLAYER)[0]:

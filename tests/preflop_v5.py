@@ -37,6 +37,27 @@ def test_avaliador_numba_igual_fast_eval():
             assert eval_cards(np.array(cards, dtype=np.int64), n) == ref, cards
 
 
+def test_icm_agrupado_igual_icm_exato():
+    from engine.icm import icm_equity
+    from engine.icm_groups import SCENARIOS, icm_grouped, scenario_payouts
+    rng = random.Random(1)
+    for _ in range(300):
+        n = rng.randint(2, 9)
+        vals = [rng.choice([0, 5, 10, 10, 15, 20.5]) for _ in range(n)]
+        if all(v == 0 for v in vals):
+            continue
+        pay = sorted([rng.random() * 100 for _ in range(rng.randint(1, n))], reverse=True)
+        a = icm_equity(vals, pay)
+        b = icm_grouped(vals, pay)
+        assert max(abs(x - y) for x, y in zip(a, b)) < 1e-9, (vals, pay)
+    # cenários: prize pool = total de fichas; todo mundo igual = cada um vale o stack
+    for name in SCENARIOS:
+        pay, others = scenario_payouts(name, 8, 25.0)
+        assert abs(sum(pay) - 25.0 * (8 + len(others))) < 1e-6
+        eq = icm_grouped([25.0] * (8 + len(others)), pay)
+        assert all(abs(x - 25.0) < 1e-9 for x in eq), (name, eq[:3])
+
+
 def _node(tree, path):
     nid = 0
     for lab in path:
@@ -56,15 +77,15 @@ def test_arvore():
     assert t40.labels[_node(t40, ["fold"] * 6)] == ("fold", "limp", "raise 3", "allin")
     assert t40.labels[_node(t40, ["fold"] * 6 + ["limp"])] == ("check", "raise 3.5", "allin")
     for tree, cfg in ((t15, PreflopConfig(15)), (t40, PreflopConfig(40)),
-                      (PreflopTree(PreflopConfig(25, payouts=[500.0, 300.0, 200.0])), None)):
+                      (PreflopTree(PreflopConfig(25, icm="mesa_final")), None)):
         assert all(len(live) <= 3 for _, live, _ in tree.terms)
         for t in range(len(tree.terms)):
             for k in range(tree.tnlive[t] if tree.tkind[t] != T_FOLD else 1):
                 tot = tree.tpay[t, k].sum()
-                if cfg is not None:  # chipEV: o que um ganha, outros perdem
-                    assert abs(tot) < 1e-9, tot
-                else:  # ICM: a soma é sempre o total de prêmios
-                    assert abs(tot - 1000.0) < 1e-6, tot
+                # chipEV: o que um ganha, outros perdem. ICM de mesa final
+                # (sem outras mesas): o $ total da mesa não muda, só troca
+                # de mão -- relativo ao começo, a soma também é zero
+                assert abs(tot) < 1e-6, tot
 
 
 def test_heads_up_bate_com_pushfold():

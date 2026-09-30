@@ -29,7 +29,9 @@ PENSADO PRA RODAR NO SEU COMPUTADOR (usa todos os núcleos do processador).
 Opções:
   --stacks 15,25        só esses stacks
   --mesa 9              mesa de 9 jogadores (padrão 8)
-  --icm                 valores em ICM (prêmios 50/30/20% da mesa) em vez de fichas
+  --icm bolha,mesa_final  também treina esses cenários de ICM (além do chipEV):
+                        bolha, perto_ft, mesa_final, satelite (ver engine/icm_groups.py);
+                        --icm todos = os 4. --so-icm pula o chipEV.
   --iteracoes 50000000  alvo de iterações (padrão: depende do stack, ver ITERATIONS_BY_STACK)
   --pasta CAMINHO       onde ficam checkpoints/resultados (padrão: pasta deste script)
   --nucleos 8           quantos núcleos usar (padrão: todos)
@@ -55,20 +57,19 @@ STACKS = [15.0, 25.0, 40.0, 60.0, 100.0]
 ITERATIONS_BY_STACK = {15.0: 100_000_000, 25.0: 150_000_000, 40.0: 200_000_000,
                        60.0: 200_000_000, 100.0: 300_000_000}
 DEFAULT_ITERATIONS = 200_000_000
-ICM_PAYOUTS = [500.0, 300.0, 200.0]
 CHECKPOINT_MINUTES = 10
 RESULT_FORMAT = 1
 
 
 def label_for(stack, mesa, icm):
-    return f"preflop_v5_{int(stack)}bb_{mesa}max" + ("_icm" if icm else "")
+    return f"preflop_v5_{int(stack)}bb_{mesa}max" + (f"_icm-{icm}" if icm else "")
 
 
 def config_key(cfg):
     """O que precisa bater pra um checkpoint poder ser retomado."""
     return {k: getattr(cfg, k) for k in ("stack", "n", "ante", "open_size", "sb_open_size", "bb_iso_size",
                                          "threebet_ip", "threebet_oop", "per_caller", "fourbet_mult",
-                                         "jam_threshold", "max_flop", "sb_limp", "payouts")}
+                                         "jam_threshold", "max_flop", "sb_limp", "payouts", "other_stacks", "icm")}
 
 
 def export_strategy(solver):
@@ -89,6 +90,9 @@ def export_strategy(solver):
             "actor": pos[int(tr.actor[nid])],
             "labels": list(tr.labels[nid]),
             "freq": freq,
+            # chance por mão de a situação acontecer (da checagem final);
+            # ~0 = nunca acontece no equilíbrio, resposta não treinada
+            "situation_freq": getattr(solver, "node_freq", {}).get(int(nid)),
         })
     return {"classes": list(CLASSES), "nodes": nodes}
 
@@ -98,7 +102,7 @@ def run_one(stack, mesa, icm, iterations, out_dir, stop, check_deals=100_000):
     label = label_for(stack, mesa, icm)
     result_path = out_dir / f"resultado_{label}.pkl"
     ckpt_path = out_dir / f"checkpoint_{label}.pkl"
-    cfg = PreflopConfig(stack, n_players=mesa, payouts=ICM_PAYOUTS if icm else None)
+    cfg = PreflopConfig(stack, n_players=mesa, icm=icm)
     key = config_key(cfg)
 
     if result_path.exists():
@@ -193,7 +197,9 @@ def main():
     ap = argparse.ArgumentParser(description="Treino offline do pré-flop v5 (mesa cheia).")
     ap.add_argument("--stacks", type=lambda t: _parse_list(t, float), default=STACKS)
     ap.add_argument("--mesa", type=int, choices=(8, 9), default=8)
-    ap.add_argument("--icm", action="store_true")
+    ap.add_argument("--icm", type=str, default="",
+                    help="cenários de ICM, separados por vírgula (ou 'todos')")
+    ap.add_argument("--so-icm", action="store_true", help="não treina o chipEV, só os cenários de ICM")
     ap.add_argument("--iteracoes", type=int, default=None)
     ap.add_argument("--pasta", type=Path, default=BASE_DIR)
     ap.add_argument("--nucleos", type=int, default=None)
@@ -206,14 +212,24 @@ def main():
     out_dir = args.pasta.resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
     from engine.preflop_v5 import ENGINE_VERSION
-    print(f"Motor {ENGINE_VERSION}. Mesa de {args.mesa}, {'ICM' if args.icm else 'fichas (chipEV)'}. "
+    from engine.icm_groups import SCENARIOS
+    icms = list(SCENARIOS) if args.icm == "todos" else _parse_list(args.icm, str)
+    for x in icms:
+        if x not in SCENARIOS:
+            sys.exit(f"ERRO: cenário de ICM desconhecido {x!r} -- use {', '.join(SCENARIOS)} ou todos")
+    modes = ([] if args.so_icm else [None]) + icms
+    if not modes:
+        sys.exit("ERRO: --so-icm sem --icm não deixa nada pra treinar")
+    names = ", ".join("chipEV" if m is None else f"ICM {m}" for m in modes)
+    print(f"Motor {ENGINE_VERSION}. Mesa de {args.mesa}. Modos: {names}. "
           f"Stacks: {', '.join(f'{s:g}' for s in args.stacks)}. Arquivos em {out_dir}.\n"
           f"Pode parar (Ctrl+C) e retomar quando quiser.\n", flush=True)
     with GracefulStop() as stop:
-        for stack in args.stacks:
-            it = args.iteracoes or ITERATIONS_BY_STACK.get(stack, DEFAULT_ITERATIONS)
-            if run_one(stack, args.mesa, args.icm, it, out_dir, stop, args.checagem_mesas) == "stopped":
-                return
+        for mode in modes:
+            for stack in args.stacks:
+                it = args.iteracoes or ITERATIONS_BY_STACK.get(stack, DEFAULT_ITERATIONS)
+                if run_one(stack, args.mesa, mode, it, out_dir, stop, args.checagem_mesas) == "stopped":
+                    return
     print("Todos os stacks concluídos!")
 
 

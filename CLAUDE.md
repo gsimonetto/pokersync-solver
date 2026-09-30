@@ -223,3 +223,15 @@ com diferença de EV > 0,05bb).
 
 `engine/postflop_fast.py`: solver pós-flop heads-up vetorizado (numba),
 exploitability exata; `tests/postflop_fast.py`.
+
+ICM no pré-flop v5 (2026-09-30, pedido do usuário: chipEV + ICM alto):
+cenários em `engine/icm_groups.py::SCENARIOS` (bolha, perto_ft,
+mesa_final, satelite), com os jogadores das outras mesas incluídos no
+ICM (`icm_grouped`: Malmuth-Harville exato agrupando stacks iguais --
+igual ao `icm.py`, testado). Valores em "bb de ICM" (prize pool = total
+de fichas), relativos ao começo da mão. Limitação: todo mundo NA MESA
+tem o mesmo stack (stacks diferentes na mesa exigem árvore com side pot
+-- etapa futura). Script: `--icm todos` ou `--icm bolha,satelite`.
+Situações que nunca acontecem no equilíbrio (ex: all-in do BTN no
+satélite) não são treinadas: `situation_freq` de cada nó no resultado
+serve pra esconder essas respostas no modo treino.
