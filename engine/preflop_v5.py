@@ -483,7 +483,7 @@ def _avg(ssum, off, na, c):
 
 
 @njit(cache=False)
-def _traverse(node, p, tw, plus, ntype, actor, nact, cstart, children, term_of, regoff,
+def _traverse(node, p, tw, plus, eps, ntype, actor, nact, cstart, children, term_of, regoff,
               tkind, tnlive, tlive, tpay, teqr, reg, ssum, cls, vals):
     if ntype[node] == 1:
         t = term_of[node]
@@ -504,7 +504,7 @@ def _traverse(node, p, tw, plus, ntype, actor, nact, cstart, children, term_of, 
         ua = np.empty(na)
         u = 0.0
         for k in range(na):
-            ua[k] = _traverse(children[s0 + k], p, tw, plus, ntype, actor, nact, cstart, children, term_of,
+            ua[k] = _traverse(children[s0 + k], p, tw, plus, eps, ntype, actor, nact, cstart, children, term_of,
                               regoff, tkind, tnlive, tlive, tpay, teqr, reg, ssum, cls, vals)
             u += sig[k] * ua[k]
         for k in range(na):
@@ -514,18 +514,26 @@ def _traverse(node, p, tw, plus, ntype, actor, nact, cstart, children, term_of, 
         return u
     for k in range(na):
         ssum[off + k * 169 + c] += tw * sig[k]
-    x = np.random.random()
-    k = 0
-    acc = sig[0]
-    while x >= acc and k < na - 1:
-        k += 1
-        acc += sig[k]
-    return _traverse(children[s0 + k], p, tw, plus, ntype, actor, nact, cstart, children, term_of, regoff,
+    # "tremor": com chance eps, o oponente escolhe uma ação qualquer (uniforme).
+    # Sem isso, uma situação que o equilíbrio nunca produz (ex: all-in do
+    # BTN no satélite) nunca é visitada por quem responde, e a resposta
+    # ali fica sem treino (50/50). Com eps pequeno o efeito nas situações
+    # normais é desprezível (ver PreflopSolver.__init__).
+    if eps > 0.0 and np.random.random() < eps:
+        k = int(np.random.random() * na)
+    else:
+        x = np.random.random()
+        k = 0
+        acc = sig[0]
+        while x >= acc and k < na - 1:
+            k += 1
+            acc += sig[k]
+    return _traverse(children[s0 + k], p, tw, plus, eps, ntype, actor, nact, cstart, children, term_of, regoff,
                      tkind, tnlive, tlive, tpay, teqr, reg, ssum, cls, vals)
 
 
 @njit(cache=False)
-def _train(t0, iters, plus, n, K, class_of, ntype, actor, nact, cstart, children, term_of, regoff,
+def _train(t0, iters, plus, eps, n, K, class_of, ntype, actor, nact, cstart, children, term_of, regoff,
            tkind, tnlive, tlive, tpay, teqr, reg, ssum):
     hole = np.empty((n, 2), dtype=np.int64)
     cls = np.empty(n, dtype=np.int64)
@@ -534,12 +542,12 @@ def _train(t0, iters, plus, n, K, class_of, ntype, actor, nact, cstart, children
         tw = 1.0  # o peso do tempo vem do desconto por intervalo (ver PreflopSolver.train)
         _deal(n, K, class_of, hole, cls, vals)
         for p in range(n):
-            _traverse(0, p, tw, plus, ntype, actor, nact, cstart, children, term_of, regoff,
+            _traverse(0, p, tw, plus, eps, ntype, actor, nact, cstart, children, term_of, regoff,
                       tkind, tnlive, tlive, tpay, teqr, reg, ssum, cls, vals)
 
 
 @njit(cache=False, parallel=True)
-def _train_par(t0, iters, plus, n, K, class_of, ntype, actor, nact, cstart, children, term_of, regoff,
+def _train_par(t0, iters, plus, eps, n, K, class_of, ntype, actor, nact, cstart, children, term_of, regoff,
                tkind, tnlive, tlive, tpay, teqr, reg, ssum):
     """Igual `_train`, mas com as iterações divididas entre os núcleos do
     processador, todos escrevendo nos MESMOS regrets sem trava ("Hogwild",
@@ -553,7 +561,7 @@ def _train_par(t0, iters, plus, n, K, class_of, ntype, actor, nact, cstart, chil
         tw = 1.0
         _deal(n, K, class_of, hole, cls, vals)
         for p in range(n):
-            _traverse(0, p, tw, plus, ntype, actor, nact, cstart, children, term_of, regoff,
+            _traverse(0, p, tw, plus, eps, ntype, actor, nact, cstart, children, term_of, regoff,
                       tkind, tnlive, tlive, tpay, teqr, reg, ssum, cls, vals)
 
 
@@ -729,7 +737,15 @@ def _eval_many(deals, n, K, mode, class_of, ntype, actor, nact, cstart, children
 # ---------------------------------------------------------------------------
 
 class PreflopSolver:
-    def __init__(self, cfg: PreflopConfig, boards=16, seed=1, cfr_plus=False, interval=50_000):
+    def __init__(self, cfg: PreflopConfig, boards=16, seed=1, cfr_plus=False, interval=50_000,
+                 tremble=0.003):
+        """tremble: chance de, ao sortear a ação de um oponente, escolher
+        uma ação qualquer em vez da estratégia -- faz as situações fora do
+        equilíbrio (que nunca aconteceriam) também serem treinadas. A
+        resposta nelas é treinada como se a mão de quem "errou" fosse
+        qualquer uma (não há como saber que mão faria uma jogada que o
+        equilíbrio nunca faz)."""
+        self.eps = tremble
         self.cfg = cfg
         self.interval = interval
         self.cfr_plus = cfr_plus
@@ -762,7 +778,7 @@ class PreflopSolver:
             to_boundary = self.interval - (self.iterations % self.interval)
             step = min(left, to_boundary)
             _seed(self.seed * 1_000_003 + self.iterations)
-            fn(self.iterations, step, self.cfr_plus, self.cfg.n, self.boards, CLASS_OF_CARDS,
+            fn(self.iterations, step, self.cfr_plus, self.eps, self.cfg.n, self.boards, CLASS_OF_CARDS,
                *self._arrays(), self.reg, self.ssum)
             self.iterations += step
             left -= step
