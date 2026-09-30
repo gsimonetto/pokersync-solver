@@ -112,17 +112,51 @@ class PreflopConfig:
 # realização de equity (EQR) -- aproximação a calibrar
 # ---------------------------------------------------------------------------
 
+_EQR_TABLE = None
+
+
+def _eqr_table():
+    """Tabela calibrada (scripts/calibrar_eqr.py) ou None se não existir."""
+    global _EQR_TABLE
+    if _EQR_TABLE is None:
+        import json
+        from pathlib import Path
+        path = Path(__file__).resolve().parent / "data" / "eqr_table.json"
+        _EQR_TABLE = json.loads(path.read_text()) if path.exists() else False
+    return _EQR_TABLE or None
+
+
+def _eqr_from_table(tab, hand_class, role, spr):
+    """Fator da classe no papel ('oop'/'ip'), interpolado em log(SPR) entre
+    os centros das faixas calibradas (constante fora delas)."""
+    centers = tab["spr_center"]
+    vals = [tab[role][b]["classes"][hand_class] for b in range(len(centers))]
+    x = np.log(max(spr, 1e-3))
+    xs = np.log(centers)
+    return float(np.interp(x, xs, vals))
+
+
 def eqr_factor(hand_class, pos_rank, n_live, spr):
     """Fator de realização de equity de `hand_class` num pote de `n_live`
     jogadores, `pos_rank` = 0 pra quem age primeiro no flop (mais fora de
     posição) até n_live-1 (último, em posição). spr = pilha restante /
     pote no flop.
 
-    Aproximação inicial (a ser calibrada com o solver pós-flop):
-      - posição: em posição realiza mais que a equity, fora realiza menos;
-      - mão: suited e conectada realizam mais; offsuit desconectada menos;
-      - SPR: com pouca pilha atrás (pote comprometido) todo mundo realiza
-        quase exatamente a equity (vai ao showdown) -> fator tende a 1."""
+    Com a tabela calibrada (engine/data/eqr_table.json, gerada por
+    scripts/calibrar_eqr.py resolvendo flops de verdade com o solver
+    pós-flop): heads-up usa o fator medido da classe no papel (fora/em
+    posição) e SPR; pote a 3 usa "fora de posição" pro primeiro, "em
+    posição" pro último e a média pro do meio (aproximação -- o solver
+    pós-flop é heads-up).
+
+    Sem a tabela: aproximação inicial (posição, tipo de mão, SPR)."""
+    tab = _eqr_table()
+    if tab is not None:
+        if pos_rank == 0:
+            return _eqr_from_table(tab, hand_class, "oop", spr)
+        if pos_rank == n_live - 1:
+            return _eqr_from_table(tab, hand_class, "ip", spr)
+        return 0.5 * (_eqr_from_table(tab, hand_class, "oop", spr) + _eqr_from_table(tab, hand_class, "ip", spr))
     if n_live == 2:
         base = (-0.12, 0.06)[pos_rank]
     else:
