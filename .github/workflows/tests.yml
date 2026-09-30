@@ -47,6 +47,9 @@ jobs:
       - name: Pós-flop — contabilidade com ruas anteriores e stacks diferentes
         run: python tests/postflop_multistreet_accounting.py
 
+      - name: Pós-flop rápido (MDF + exploitability river/turn)
+        run: python tests/postflop_fast.py
+
       - name: RFI/Jam multi-tamanho (regressão contra motor legado)
         run: python tests/rfi_jam_multisize.py
 
