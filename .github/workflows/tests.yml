@@ -32,6 +32,9 @@ jobs:
       - name: Matriz de equity de produção (arquivo pronto usado pelos jobs)
         run: python tests/equity_production.py
 
+      - name: RFI/Jam v2 (ante, call do BB, all-in de quem abre) — explorabilidade + direção do EV
+        run: python tests/rfi_jam_v2.py
+
       - name: Pós-flop river (MDF exata + exploitability rigorosa)
         run: python tests/postflop_river.py
 
