@@ -11,6 +11,14 @@ Retomável: cada (spot, flop) resolvido fica gravado em
 calib_parcial.json na pasta indicada -- rodar de novo pula o que já foi.
 
 Uso: python scripts/calibrar_eqr.py [--pasta DIR] [--flops 8] [--iteracoes 50]
+
+Repetições do pós-flop: `--iteracoes` nos potes com pouca pilha atrás
+(SPR < 3); 2x com SPR 3-8 e 3x com SPR > 8 -- pilha funda tem árvore
+mais longa e precisa de mais treino (com 50 o erro chegava a 5-6% do pote).
+
+Tempo estimado num i9 de 8 núcleos: 3 a 5 horas (80 flops; os de 100bb são
+os mais lentos). Pode parar com Ctrl+C e rodar de novo: continua de onde
+parou (cada flop resolvido fica salvo na hora).
 """
 
 import argparse
@@ -81,6 +89,9 @@ def main():
     part_path = args.pasta / "calib_parcial.json"
     done = json.loads(part_path.read_text()) if part_path.exists() else {}
     flops = CALIB_FLOPS[:args.flops]
+    total = sum(len(sp) for sp in SPOTS.values()) * len(flops)
+    print(f"Calibração da realização de equity: {len(done)}/{total} flops já prontos "
+          f"(salvos em {part_path}).", flush=True)
 
     for stack, spots in SPOTS.items():
         solver = None
@@ -96,13 +107,14 @@ def main():
             pot, behind, ranges, live = spot_ranges(solver, path)
             oop, ip = sorted(live, key=solver.tree.post_rank)
             spr = behind / pot
+            iters = args.iteracoes * (1 if spr < 3 else 2 if spr < 8 else 3)
             for f in todo:
                 t = time.time()
-                o, i, ex = spot_realization(f, ranges[oop], ranges[ip], pot, behind, iterations=args.iteracoes)
+                o, i, ex = spot_realization(f, ranges[oop], ranges[ip], pot, behind, iterations=iters)
                 done[f"{stack:g}|{name}|{f}"] = {"spr": spr, "oop": o, "ip": i, "exploit_pct": ex}
                 part_path.write_text(json.dumps(done))
-                print(f"  {stack:g}bb {name} {f}: SPR {spr:.1f}, {time.time() - t:.0f}s, exploit {ex:.2f}%",
-                      flush=True)
+                print(f"  [{len(done)}/{total}] {stack:g}bb {name} {f}: SPR {spr:.1f}, {time.time() - t:.0f}s, "
+                      f"erro {ex:.2f}% do pote", flush=True)
 
     # tabela: por faixa de SPR e papel, soma EV / soma equity por classe
     table = {"spr_buckets": SPR_BUCKETS, "spr_center": [], "oop": [], "ip": []}
