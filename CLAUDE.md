@@ -235,3 +235,15 @@ tem o mesmo stack (stacks diferentes na mesa exigem árvore com side pot
 Situações que nunca acontecem no equilíbrio (ex: all-in do BTN no
 satélite) não são treinadas: `situation_freq` de cada nó no resultado
 serve pra esconder essas respostas no modo treino.
+
+EQR calibrada (2026-10-03, `preflop-v5.1-2026-10-03`): `engine/data/eqr_table.json`
+gerada por `scripts/calibrar_eqr.py` (80 flops resolvidos no PC do usuário,
+erro médio 0,4-2,5% do pote). Achado: o fator depende do TIPO DE POTE e
+do papel, não só da posição (limp do SB: o SB fora de posição realiza
+1,03 e o BB 0,96; 3-bet do BB: o BB fora de posição 1,09, o BTN 0,84;
+pote aberto pelo BTN: BTN 1,09-1,12, BB 0,81). Tabela por categoria
+(`pot_category`: limp, srp/3bet x agressor em posição ou não), média
+medida da coluna x ajuste leve por tipo de mão (`hand_adjust`). A medida
+mão a mão direta não é usada: com 8 flops depende de quais flops caíram
+(T9s saía 1,5-1,9) -- fica em "measured_*" no JSON. Medir por mão exige
+~50 flops por spot.

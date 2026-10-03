@@ -33,7 +33,7 @@ sys.path.insert(0, str(BASE))
 import numpy as np  # noqa: E402
 
 from engine.eqr_calibration import CALIB_FLOPS, spot_realization  # noqa: E402
-from engine.preflop_v5 import CLASSES, PLAYER, PreflopConfig, PreflopSolver, _avg  # noqa: E402
+from engine.preflop_v5 import CLASSES, PLAYER, PreflopConfig, PreflopSolver, _avg, hand_adjust  # noqa: E402
 
 TABLE_PATH = BASE / "engine" / "data" / "eqr_table.json"
 # spots por stack: sequência de ações (labels) até o flop heads-up
@@ -49,7 +49,6 @@ SPOTS = {
             "SB_limp_BB": ["fold"] * 6 + ["limp", "check"],
             "BB_3bet_BTN": ["fold"] * 5 + ["raise 2.5", "fold", "raise 10", "call"]},
 }
-SPR_BUCKETS = [(0.0, 3.0), (3.0, 8.0), (8.0, 1e9)]  # baixo, médio, alto
 
 
 def spot_ranges(solver, path):
@@ -116,33 +115,61 @@ def main():
                 print(f"  [{len(done)}/{total}] {stack:g}bb {name} {f}: SPR {spr:.1f}, {time.time() - t:.0f}s, "
                       f"erro {ex:.2f}% do pote", flush=True)
 
-    # tabela: por faixa de SPR e papel, soma EV / soma equity por classe
-    table = {"spr_buckets": SPR_BUCKETS, "spr_center": [], "oop": [], "ip": []}
-    for lo, hi in SPR_BUCKETS:
-        sprs = [v["spr"] for v in done.values() if lo <= v["spr"] < hi]
-        # centro da faixa em escala log (a interpolação do motor é em log(SPR))
-        table["spr_center"].append(float(np.exp(np.mean(np.log(sprs)))) if sprs else (lo + min(hi, 30.0)) / 2)
-        for role in ("oop", "ip"):
+    write_table(done)
+
+
+# tipo de pote de cada spot calibrado (ver engine/preflop_v5.pot_category)
+SPOT_CATEGORY = {"BTN_vs_BB": "srp_aggr_ip", "CO_vs_BTN": "srp_aggr_oop",
+                 "SB_limp_BB": "limp", "BB_3bet_BTN": "3bet_aggr_oop"}
+
+
+def build_table(done):
+    """Tabela por tipo de pote: em cada SPR calibrado (um por stack), o
+    fator médio "EV / equity" de cada coluna (oop = age primeiro no flop,
+    ip = age por último), somando todas as mãos e flops -- esse é o efeito
+    grande e bem medido (papel/posição). Por mão: média da coluna x (1 +
+    ajuste leve por tipo de mão, ver preflop_v5.hand_adjust). A medida mão
+    a mão direta NÃO é usada: com 8 flops ela depende de quais flops caíram
+    (ex: T9s saía 1,5-1,9 porque T-9-3, 8-7-6, K-J-T e T-8-2 estão na
+    amostra); fica gravada em "measured" só pra consulta."""
+    groups = {}
+    for key, v in done.items():
+        stack, name, _flop = key.split("|")
+        groups.setdefault((SPOT_CATEGORY[name], round(v["spr"], 2)), []).append(v)
+    cats = {}
+    for (cat, spr), vs in sorted(groups.items()):
+        point = {"spr": spr, "flops": len(vs)}
+        scale = spr / (spr + 1.5)
+        for col in ("oop", "ip"):
             acc = {}
-            for v in done.values():
-                if lo <= v["spr"] < hi:
-                    for cl, (ev, e) in v[role].items():
-                        d = acc.setdefault(cl, [0.0, 0.0])
-                        d[0] += ev
-                        d[1] += e
+            for v in vs:
+                for cl, (ev, e) in v[col].items():
+                    d = acc.setdefault(cl, [0.0, 0.0])
+                    d[0] += ev
+                    d[1] += e
             tot_ev = sum(x[0] for x in acc.values())
             tot_e = sum(x[1] for x in acc.values())
             avg = tot_ev / tot_e if tot_e > 0 else 1.0
-            # classes com pouca amostra puxadas pra média do papel
-            # (encolhimento: soma "k" de equity com o fator médio)
-            k = 0.02 * tot_e / max(len(acc), 1) * 5
-            fac = {cl: (acc.get(cl, [0, 0])[0] + k * avg) / (acc.get(cl, [0, 0])[1] + k) for cl in CLASSES}
-            table[role].append({"avg": avg, "classes": fac})
+            point[col] = {cl: avg * (1.0 + hand_adjust(cl) * scale) for cl in CLASSES}
+            point["avg_" + col] = avg
+            point["measured_" + col] = {cl: ev / e for cl, (ev, e) in acc.items() if e > 0}
+        cats.setdefault(cat, []).append(point)
+    table = {"version": 2, "categories": {}}
+    for cat, pts in cats.items():
+        pts.sort(key=lambda p: p["spr"])
+        table["categories"][cat] = {k: [p[k] for p in pts] for k in
+                                    ("spr", "flops", "oop", "ip", "avg_oop", "avg_ip", "measured_oop", "measured_ip")}
+    return table
+
+
+def write_table(done):
+    table = build_table(done)
     TABLE_PATH.parent.mkdir(parents=True, exist_ok=True)
     TABLE_PATH.write_text(json.dumps(table, indent=0))
-    for b, (lo, hi) in enumerate(SPR_BUCKETS):
-        print(f"SPR {lo:g}-{hi:g}: fator médio fora de posição {table['oop'][b]['avg']:.3f}, "
-              f"em posição {table['ip'][b]['avg']:.3f}")
+    for cat, c in table["categories"].items():
+        pts = ", ".join(f"SPR {s:g}: fora {o:.2f} / em pos. {i:.2f}"
+                        for s, o, i in zip(c["spr"], c["avg_oop"], c["avg_ip"]))
+        print(f"{cat}: {pts}")
     print(f"tabela gravada em {TABLE_PATH}")
 
 

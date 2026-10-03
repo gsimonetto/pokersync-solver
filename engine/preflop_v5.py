@@ -35,7 +35,7 @@ from engine.hand_classes import all_hand_classes
 from engine.icm_groups import SCENARIOS, icm_grouped, scenario_payouts
 from engine.nb_eval import eval_cards
 
-ENGINE_VERSION = "preflop-v5-2026-09-30"
+ENGINE_VERSION = "preflop-v5.1-2026-10-03"  # v5.1: EQR calibrada (eqr_table.json), tremor
 
 POSITIONS = {
     2: ["SB", "BB"],  # só pra testes (comparação com os motores heads-up)
@@ -126,55 +126,65 @@ def _eqr_table():
     return _EQR_TABLE or None
 
 
-def _eqr_from_table(tab, hand_class, role, spr):
-    """Fator da classe no papel ('oop'/'ip'), interpolado em log(SPR) entre
-    os centros das faixas calibradas (constante fora delas)."""
-    centers = tab["spr_center"]
-    vals = [tab[role][b]["classes"][hand_class] for b in range(len(centers))]
-    x = np.log(max(spr, 1e-3))
-    xs = np.log(centers)
-    return float(np.interp(x, xs, vals))
+def pot_category(level, aggr_is_ip):
+    """Tipo de pote pra tabela de EQR: limp (ninguém aumentou), pote
+    aberto (1 aumento) ou de 3-bet+ -- e se o último agressor age por
+    último no flop. A calibração mostrou que quem tem o range mais forte
+    (o agressor) realiza mais mesmo fora de posição, então a posição sozinha
+    não basta."""
+    if level == 0:
+        return "limp"
+    kind = "srp" if level == 1 else "3bet"
+    return f"{kind}_aggr_{'ip' if aggr_is_ip else 'oop'}"
+
+
+def eqr_from_table(tab, hand_class, category, column, spr):
+    """Fator medido da classe no tipo de pote/coluna ('oop' = quem age
+    primeiro no flop, 'ip' = quem age por último), interpolado em log(SPR)
+    entre os pontos calibrados (constante fora deles). Tipo de pote sem
+    calibração (3-bet com o agressor em posição): usa o de 3-bet com o
+    agressor fora de posição, trocando as colunas pra o agressor continuar
+    com os valores de agressor."""
+    cats = tab["categories"]
+    if category not in cats:
+        if category == "3bet_aggr_ip":
+            category, column = "3bet_aggr_oop", ("oop" if column == "ip" else "ip")
+        else:
+            category = "srp_aggr_ip"
+    c = cats[category]
+    xs = np.log(c["spr"])
+    vals = [pt[hand_class] for pt in c[column]]
+    return float(np.interp(np.log(max(spr, 1e-3)), xs, vals))
+
+
+def hand_adjust(hand_class):
+    """Ajuste leve por tipo de mão (suited e conectada realizam mais,
+    offsuit desconectada menos) -- usado tanto na aproximação inicial
+    quanto em cima das médias calibradas (com 8 flops a medida mão a mão
+    ainda é ruidosa demais: depende de quais flops caíram)."""
+    r1, r2 = hand_class[0], hand_class[1]
+    if r1 == r2:
+        return 0.02
+    ranks = "23456789TJQKA"
+    gap = ranks.index(r1) - ranks.index(r2) - 1
+    adj = 0.05 if hand_class[2] == "s" else -0.04
+    adj += {0: 0.03, 1: 0.02, 2: 0.0}.get(gap, -0.03)
+    if ranks.index(r2) >= 8:  # duas cartas altas (T+)
+        adj += 0.02
+    return adj
 
 
 def eqr_factor(hand_class, pos_rank, n_live, spr):
-    """Fator de realização de equity de `hand_class` num pote de `n_live`
-    jogadores, `pos_rank` = 0 pra quem age primeiro no flop (mais fora de
-    posição) até n_live-1 (último, em posição). spr = pilha restante /
-    pote no flop.
-
-    Com a tabela calibrada (engine/data/eqr_table.json, gerada por
-    scripts/calibrar_eqr.py resolvendo flops de verdade com o solver
-    pós-flop): heads-up usa o fator medido da classe no papel (fora/em
-    posição) e SPR; pote a 3 usa "fora de posição" pro primeiro, "em
-    posição" pro último e a média pro do meio (aproximação -- o solver
-    pós-flop é heads-up).
-
-    Sem a tabela: aproximação inicial (posição, tipo de mão, SPR)."""
-    tab = _eqr_table()
-    if tab is not None:
-        if pos_rank == 0:
-            return _eqr_from_table(tab, hand_class, "oop", spr)
-        if pos_rank == n_live - 1:
-            return _eqr_from_table(tab, hand_class, "ip", spr)
-        return 0.5 * (_eqr_from_table(tab, hand_class, "oop", spr) + _eqr_from_table(tab, hand_class, "ip", spr))
+    """Aproximação inicial (sem tabela calibrada): fator de realização de
+    equity por posição (pos_rank 0 = age primeiro no flop), tipo de mão e
+    SPR (pouca pilha atrás -> fator tende a 1). Com a tabela calibrada
+    (engine/data/eqr_table.json) o motor usa `eqr_from_table` em vez desta."""
     if n_live == 2:
         base = (-0.12, 0.06)[pos_rank]
     else:
         base = (-0.14, -0.05, 0.06)[pos_rank]
-    r1, r2 = hand_class[0], hand_class[1]
-    adj = 0.0
-    if r1 == r2:
-        adj += 0.02
-    else:
-        ranks = "23456789TJQKA"
-        gap = ranks.index(r1) - ranks.index(r2) - 1
-        suited = hand_class[2] == "s"
-        adj += 0.05 if suited else -0.04
-        adj += {0: 0.03, 1: 0.02, 2: 0.0}.get(gap, -0.03)
-        if ranks.index(r2) >= 8:  # duas cartas altas (T+)
-            adj += 0.02
     scale = spr / (spr + 1.5)
-    return 1.0 + (base + adj) * scale
+    return 1.0 + (base + hand_adjust(hand_class)) * scale
 
 
 # ---------------------------------------------------------------------------
@@ -210,6 +220,7 @@ class PreflopTree:
         self.children, self.labels, self.hist = [], [], []
         self.term_of = []      # nó -> índice do final (ou -1)
         self.terms = []        # (tipo, live seats, commits)
+        self.term_info = []    # (nível de aumento, último agressor) -- pra EQR
         st = _State()
         st.commit = [0.0] * n
         st.commit[self.sb] = 0.5
@@ -359,6 +370,7 @@ class PreflopTree:
             kind = T_FLOP
         self.term_of[nid] = len(self.terms)
         self.terms.append((kind, tuple(live), tuple(st.commit)))
+        self.term_info.append((st.level, st.aggr))
         return nid
 
     def _finish(self):
@@ -402,10 +414,27 @@ class PreflopTree:
                 c = commit[live[0]]
                 spr = (cfg.eff - c) / pot
                 ranks = sorted(live, key=self.post_rank)
+                level, aggr = self.term_info[t]
+                tab = _eqr_table()
                 for k, w in enumerate(live):
                     pr = ranks.index(w)
+                    if tab is None:
+                        for ci, cl in enumerate(CLASSES):
+                            self.teqr[t, k, ci] = eqr_factor(cl, pr, len(live), spr)
+                        continue
+                    if level == 0:  # limp do SB: SB fora, BB em posição
+                        cat, col = "limp", ("oop" if pr == 0 else "ip")
+                    else:
+                        aggr_ip = ranks.index(aggr) == len(live) - 1
+                        cat = pot_category(level, aggr_ip)
+                        # agressor fica com a coluna dele; quem pagou, com a
+                        # do outro lado (em pote a 3, os dois que pagaram
+                        # usam a coluna de quem pagou)
+                        aggr_col = "ip" if aggr_ip else "oop"
+                        caller_col = "oop" if aggr_ip else "ip"
+                        col = aggr_col if w == aggr else caller_col
                     for ci, cl in enumerate(CLASSES):
-                        self.teqr[t, k, ci] = eqr_factor(cl, pr, len(live), spr)
+                        self.teqr[t, k, ci] = eqr_from_table(tab, cl, cat, col, spr)
         # offsets dos regrets: nó de jogador -> início do bloco [ação][classe]
         self.regoff = np.zeros(len(self.ntype), dtype=np.int64)
         tot = 0
