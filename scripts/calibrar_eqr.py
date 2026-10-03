@@ -123,15 +123,40 @@ SPOT_CATEGORY = {"BTN_vs_BB": "srp_aggr_ip", "CO_vs_BTN": "srp_aggr_oop",
                  "SB_limp_BB": "limp", "BB_3bet_BTN": "3bet_aggr_oop"}
 
 
+def hand_group(cl):
+    """Grupo da mão pra calibração: cada grupo junta várias classes (e
+    todos os flops), então o fator medido fica estável -- mão a mão, com 8
+    flops, depende demais de quais flops caíram."""
+    ranks = "23456789TJQKA"
+    hi, lo = ranks.index(cl[0]), ranks.index(cl[1])
+    if hi == lo:
+        return "par_alto" if hi >= 8 else ("par_medio" if hi >= 4 else "par_baixo")
+    suited = cl[2] == "s"
+    gap = hi - lo - 1
+    if lo >= 8:
+        g = "broadway"
+    elif hi == 12:
+        g = "ax"
+    elif gap <= 1:
+        g = "conectada"
+    elif hi >= 10:
+        g = "alta"  # K/Q + carta baixa
+    else:
+        g = "lixo"
+    return g + ("_s" if suited else "_o")
+
+
 def build_table(done):
     """Tabela por tipo de pote: em cada SPR calibrado (um por stack), o
     fator médio "EV / equity" de cada coluna (oop = age primeiro no flop,
     ip = age por último), somando todas as mãos e flops -- esse é o efeito
     grande e bem medido (papel/posição). Por mão: média da coluna x (1 +
-    ajuste leve por tipo de mão, ver preflop_v5.hand_adjust). A medida mão
-    a mão direta NÃO é usada: com 8 flops ela depende de quais flops caíram
-    (ex: T9s saía 1,5-1,9 porque T-9-3, 8-7-6, K-J-T e T-8-2 estão na
-    amostra); fica gravada em "measured" só pra consulta."""
+    Por mão: fator medido do GRUPO da mão (ver hand_group) -- mão lixo
+    realiza muito menos que a média (72o no BB: ~0,35), o que um ajuste
+    leve não captura. A medida mão a mão direta NÃO é usada: com 8 flops
+    ela depende de quais flops caíram (ex: T9s saía 1,5-1,9 porque T-9-3,
+    8-7-6, K-J-T e T-8-2 estão na amostra); fica gravada em "measured" só
+    pra consulta. Grupo com pouca amostra: média da coluna x ajuste leve."""
     groups = {}
     for key, v in done.items():
         stack, name, _flop = key.split("|")
@@ -150,7 +175,18 @@ def build_table(done):
             tot_ev = sum(x[0] for x in acc.values())
             tot_e = sum(x[1] for x in acc.values())
             avg = tot_ev / tot_e if tot_e > 0 else 1.0
-            point[col] = {cl: avg * (1.0 + hand_adjust(cl) * scale) for cl in CLASSES}
+            # fator por grupo de mão (soma EV / soma equity do grupo);
+            # grupo sem amostra (ex: mão que nunca está nesse range) fica
+            # com a média da coluna x ajuste leve por tipo de mão
+            gacc = {}
+            for cl, (ev, e) in acc.items():
+                d = gacc.setdefault(hand_group(cl), [0.0, 0.0])
+                d[0] += ev
+                d[1] += e
+            min_mass = 0.02 * tot_e  # grupo precisa de >= 2% da equity da coluna
+            gfac = {g: ev / e for g, (ev, e) in gacc.items() if e >= min_mass}
+            point[col] = {cl: gfac.get(hand_group(cl), avg * (1.0 + hand_adjust(cl) * scale)) for cl in CLASSES}
+            point["groups_" + col] = gfac
             point["avg_" + col] = avg
             point["measured_" + col] = {cl: ev / e for cl, (ev, e) in acc.items() if e > 0}
         cats.setdefault(cat, []).append(point)
@@ -158,7 +194,8 @@ def build_table(done):
     for cat, pts in cats.items():
         pts.sort(key=lambda p: p["spr"])
         table["categories"][cat] = {k: [p[k] for p in pts] for k in
-                                    ("spr", "flops", "oop", "ip", "avg_oop", "avg_ip", "measured_oop", "measured_ip")}
+                                    ("spr", "flops", "oop", "ip", "avg_oop", "avg_ip", "groups_oop", "groups_ip",
+                                     "measured_oop", "measured_ip")}
     return table
 
 
